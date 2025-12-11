@@ -670,12 +670,13 @@ async function searchHospitals(
       city: item.Rndrng_Prvdr_City,
       state: item.Rndrng_Prvdr_State_Abrvtn,
       zip: item.Rndrng_Prvdr_Zip5,
-      drg_code: item.DRG_Cd,
-      drg_description: item.DRG_Desc,
       total_discharges: item.Tot_Dschrgs,
-      average_covered_charges: item.Avg_Cvrd_Chrgs,
-      average_total_payments: item.Avg_Tot_Pymt_Amt,
-      average_medicare_payments: item.Avg_Mdcr_Pymt_Amt
+      total_beneficiaries: item.Tot_Benes,
+      total_covered_charges: item.Tot_Submtd_Cvrd_Chrg,
+      total_medicare_payments: item.Tot_Mdcr_Pymt_Amt,
+      total_payment_amount: item.Tot_Pymt_Amt,
+      average_beneficiary_age: item.Bene_Avg_Age,
+      average_risk_score: item.Bene_Avg_Risk_Scre
     }))
   };
 }
@@ -703,13 +704,13 @@ async function searchSpending(
   if (spending_drug_name) {
     query.append('filter[Brnd_Name]', spending_drug_name);
   }
-  if (year) {
-    query.append('filter[Year]', year);
-  }
 
-  // Add sorting
+  // Add sorting (default to most recent year spending)
   if (sort) {
     query.append('sort', `${sort.direction === 'desc' ? '-' : ''}${sort.field}`);
+  } else {
+    // Default sort by 2023 spending descending
+    query.append('sort', '-Tot_Spndng_2023');
   }
 
   const url = `https://data.cms.gov/data-api/v1/dataset/${datasetId}/data?${query.toString()}`;
@@ -721,19 +722,51 @@ async function searchSpending(
 
   const data = await response.json() as any[];
 
+  // Transform the wide-format data into long-format with year breakdowns
+  const drugs = data.map((item: any) => {
+    const drugInfo: any = {
+      brand_name: item.Brnd_Name,
+      generic_name: item.Gnrc_Name,
+      manufacturer: item.Mftr_Name,
+      spending_by_year: {} as any
+    };
+
+    // Extract all available years from the data (2019-2023 for Part D)
+    const years = ['2019', '2020', '2021', '2022', '2023'];
+
+    years.forEach(yr => {
+      if (item[`Tot_Spndng_${yr}`]) {
+        drugInfo.spending_by_year[yr] = {
+          total_spending: item[`Tot_Spndng_${yr}`],
+          total_claims: item[`Tot_Clms_${yr}`],
+          total_beneficiaries: item[`Tot_Benes_${yr}`],
+          total_dosage_units: item[`Tot_Dsg_Unts_${yr}`],
+          avg_spending_per_claim: item[`Avg_Spnd_Per_Clm_${yr}`],
+          avg_spending_per_beneficiary: item[`Avg_Spnd_Per_Bene_${yr}`],
+          avg_spending_per_dosage_unit: item[`Avg_Spnd_Per_Dsg_Unt_Wghtd_${yr}`]
+        };
+      }
+    });
+
+    // If year filter specified, return only that year's data
+    if (year && drugInfo.spending_by_year[year]) {
+      return {
+        brand_name: drugInfo.brand_name,
+        generic_name: drugInfo.generic_name,
+        manufacturer: drugInfo.manufacturer,
+        year: year,
+        ...drugInfo.spending_by_year[year]
+      };
+    }
+
+    return drugInfo;
+  });
+
   return {
     total: data.length,
     spending_type: spending_type,
-    drugs: data.map((item: any) => ({
-      brand_name: item.Brnd_Name,
-      generic_name: item.Gnrc_Name,
-      year: item.Year,
-      total_spending: item.Tot_Spndng,
-      total_claims: item.Tot_Clms,
-      total_beneficiaries: item.Tot_Benes,
-      average_spending_per_claim: item.Avg_Spndng_Per_Clm,
-      average_spending_per_beneficiary: item.Avg_Spndng_Per_Bene
-    }))
+    year_filter: year || 'all',
+    drugs: drugs
   };
 }
 
