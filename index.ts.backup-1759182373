@@ -1,0 +1,2293 @@
+#!/usr/bin/env node
+
+import fetch from 'node-fetch';
+import type { Response } from 'node-fetch';
+import 'dotenv/config';
+import http, { createServer } from 'http';
+import { URL, URLSearchParams } from "url";
+import { Tool } from "./types";
+import { createError, JsonValue } from "./util.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
+
+/**
+ * Logging utility for consistent log format across the application
+ */
+const logger = {
+  levels: {
+    error: 0,
+    warn: 1,
+    info: 2,
+    debug: 3
+  } as const,
+  level: (process.env.LOG_LEVEL || 'info') as LogLevel,
+  
+  formatMessage: (level: string, message: string, meta?: any) => {
+    const timestamp = new Date().toISOString();
+    return JSON.stringify({ timestamp, level, message, ...meta });
+  },
+
+  error: (message: string, meta?: any) => {
+    if (logger.levels[logger.level as keyof typeof logger.levels] >= logger.levels.error) {
+      process.stderr.write(logger.formatMessage('error', message, meta) + '\n');
+    }
+  },
+
+  warn: (message: string, meta?: any) => {
+    if (logger.levels[logger.level as keyof typeof logger.levels] >= logger.levels.warn) {
+      process.stderr.write(logger.formatMessage('warn', message, meta) + '\n');
+    }
+  },
+
+  info: (message: string, meta?: any) => {
+    if (logger.levels[logger.level as keyof typeof logger.levels] >= logger.levels.info) {
+      if (!USE_HTTP) {
+        process.stderr.write(logger.formatMessage('info', message, meta) + '\n');
+      } else {
+        process.stdout.write(logger.formatMessage('info', message, meta) + '\n');
+      }
+    }
+  },
+
+  debug: (message: string, meta?: any) => {
+    if (logger.levels[logger.level as keyof typeof logger.levels] >= logger.levels.debug) {
+      if (!USE_HTTP) {
+        process.stderr.write(logger.formatMessage('debug', message, meta) + '\n');
+      } else {
+        process.stdout.write(logger.formatMessage('debug', message, meta) + '\n');
+      }
+    }
+  }
+};
+
+type LogLevel = 'error' | 'warn' | 'info' | 'debug';
+
+// API configuration and environment variables
+const USE_HTTP = process.env.USE_HTTP === 'true';
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+const TRANSPORT = process.env.TRANSPORT || 'stdio';
+const SSE_PATH = process.env.SSE_PATH || '/mcp';
+
+// CMS Medicare dataset version mapping for each dataset type
+const versionMapGeography: { [year: string]: string } = {
+  "2023": "ddee9e22-7889-4bef-975a-7853e4cd0fbb",
+  "2022": "87304f15-9ed0-41dc-a141-6141a0327453",
+  "2021": "f00f462f-bb61-48b1-a321-1c50d78ce175",
+  "2020": "31eb3018-43e0-4259-a0d8-e7a1112ffd08",
+  "2019": "673030ae-ceed-4561-8fca-b1275395a86a",
+  "2018": "05a85700-052f-4509-af43-7042b9b35868",
+  "2017": "8e96a9f2-ce6e-46fd-b30d-8c695c756bfd",
+  "2016": "c7d3f18c-2f00-4553-8cd1-871b727d5cdd",
+  "2015": "dbee9609-2c90-43ca-b1b8-161bd9cfcdb2",
+  "2014": "28181bd2-b377-4003-b73a-4bd92d1db4a9",
+  "2013": "3c2a4756-0a8c-4e4d-845a-6ad169cb13d3"
+};
+const versionMapProviderAndService: { [year: string]: string } = {
+  "2023": "0e9f2f2b-7bf9-451a-912c-e02e654dd725",
+  "2022": "e650987d-01b7-4f09-b75e-b0b075afbf98",
+  "2021": "31dc2c47-f297-4948-bfb4-075e1bec3a02",
+  "2020": "c957b49e-1323-49e7-8678-c09da387551d",
+  "2019": "867b8ac7-ccb7-4cc9-873d-b24340d89e32",
+  "2018": "fb6d9fe8-38c1-4d24-83d4-0b7b291000b2",
+  "2017": "85bf3c9c-2244-490d-ad7d-c34e4c28f8ea",
+  "2016": "7918e22a-fbfb-4a07-9f59-f8aab2b757d4",
+  "2015": "f8cdb11a-d5f7-4fbe-aac4-05abc8ee2c83",
+  "2014": "f63b48ae-946e-48f7-9f56-327a68da4e0b",
+  "2013": "ad5e7548-98ab-4325-af4b-b2a7099b9351"
+};
+const versionMapProvider: { [year: string]: string } = {
+  "2023": "8889d81e-2ee7-448f-8713-f071038289b5",
+  "2022": "21555c17-ec1b-4e74-b2c6-925c6cbb3147",
+  "2021": "44e0a489-666c-4ea4-a1a2-360b6cdc19db",
+  "2020": "29d799aa-c660-44fe-a51a-72c4b3e661ac",
+  "2019": "6a53afe5-1cbc-4b33-9dc8-926ee532dc66",
+  "2018": "900850df-c9a9-47ce-a9e0-d0ceae5a811f",
+  "2017": "44ea2789-993f-4d55-ac44-ed7f160b58fa",
+  "2016": "2691839a-99fb-45a1-9bd9-86905ba975cc",
+  "2015": "fb870c06-27f2-4e15-b556-1731d794bb5b",
+  "2014": "100d9e00-03cd-4105-9f58-27f9bf9ab773",
+  "2013": "483a68df-26a9-42a5-a24c-7458e5374f61"
+};
+
+function getLatestYear(versionMap: { [year: string]: string }): string {
+  return Object.keys(versionMap).sort().pop()!;
+}
+
+export const SEARCH_MEDICARE_TOOL: Tool = {
+  name: "cms_search_providers",
+  description: "Search Medicare Physician & Other Practitioners data using the Centers for Medicare & Medicaid Services (CMS) database. This data includes information about services and procedures provided to Original Medicare Part B beneficiaries.",
+  input_schema: {
+    type: "object",
+    properties: {
+      dataset_type: {
+        type: "string",
+        description: "Type of dataset to search. Options:\n" +
+          "- 'geography_and_service': Use when you need to compare regions, analyze geographic patterns, study regional variations in healthcare delivery, understand geographic distribution of healthcare services, or calculate per-capita/per-beneficiary rates by region.\n" +
+          "- 'provider_and_service': Use when you need to analyze individual provider performance, track specific procedures by provider, calculate total procedures across providers, or study provider-level service patterns and outcomes.\n" +
+          "- 'provider': Use when you need to analyze provider demographics, study provider participation in Medicare, understand provider practice patterns, or examine provider-level beneficiary characteristics and risk scores."
+      },
+      year: {
+        type: "string",
+        description: "Year of the dataset to query (2013 to latest available year, defaults to latest year)."
+      },
+      hcpcs_code: {
+        type: "string",
+        description: "HCPCS code to search for (e.g., '99213' for established patient office visit)."
+      },
+      provider_type: {
+        type: "string",
+        description: "Type of provider to search for (e.g., 'Cardiology', 'Podiatry', 'Family Practice')."
+      },
+      geo_level: {
+        type: "string",
+        description: "Geographic level for filtering (e.g., 'National', 'State', 'County', 'ZIP')."
+      },
+      geo_code: {
+        type: "string",
+        description: "Geographic code to filter by (e.g., 'CA' for California, '06037' for Los Angeles County)."
+      },
+      place_of_service: {
+        type: "string",
+        description: "Place of service code to filter by (e.g., 'F' for facility, 'O' for office, 'H' for hospital)."
+      },
+      size: {
+        type: "number",
+        description: "Number of results to return (default: 10, max: 5000)."
+      },
+      offset: {
+        type: "number",
+        description: "Starting result number for pagination (default: 0)."
+      },
+      sort_by: {
+        type: "string",
+        description: "Field to sort results by (e.g., 'Tot_Srvcs', 'Tot_Benes', 'Tot_Mdcr_Pymt_Amt')."
+      },
+      sort_order: {
+        type: "string",
+        description: "Sort order ('asc' or 'desc', default: 'desc')."
+      }
+    },
+    required: ["dataset_type"]
+  },
+  responseSchema: {
+    type: "object",
+    properties: {
+      total: {
+        type: "number",
+        description: "Total number of results found"
+      },
+      providers: { 
+        type: "array",
+        description: "List of Medicare providers matching the search criteria",
+        items: {
+          type: "object",
+          properties: {
+            npi: { type: "string", description: "Provider's National Provider Identifier (NPI)" },
+            provider_name: { type: "string", description: "Provider's full name" },
+            provider_type: { type: "string", description: "Provider's specialty or type of practice" },
+            provider_address: { type: "string", description: "Provider's street address" },
+            provider_city: { type: "string", description: "Provider's city" },
+            provider_state: { type: "string", description: "Provider's state (2-letter abbreviation)" },
+            provider_zip: { type: "string", description: "Provider's ZIP code" },
+            provider_country: { type: "string", description: "Provider's country code (typically 'US')" },
+            medicare_participating: { type: "string", description: "Whether the provider participates in Medicare ('Y' for yes, 'N' for no)" },
+            total_hcpcs_codes: { type: "number", description: "Total number of unique HCPCS codes used by the provider" },
+            total_beneficiaries: { type: "number", description: "Total number of unique Medicare beneficiaries served" },
+            total_services: { type: "number", description: "Total number of services provided" },
+            total_submitted_charges: { type: "number", description: "Total amount of submitted charges in dollars" },
+            total_medicare_allowed: { type: "number", description: "Total amount allowed by Medicare in dollars" },
+            total_medicare_payment: { type: "number", description: "Total amount paid by Medicare in dollars" },
+            total_medicare_standardized: { type: "number", description: "Total standardized Medicare payment amount in dollars (adjusted for geographic differences)" },
+            beneficiary_average_age: { type: "number", description: "Average age of beneficiaries served" },
+            beneficiary_age_lt_65: { type: "number", description: "Number of beneficiaries under 65 years old" },
+            beneficiary_age_65_74: { type: "number", description: "Number of beneficiaries aged 65-74" },
+            beneficiary_age_75_84: { type: "number", description: "Number of beneficiaries aged 75-84" },
+            beneficiary_age_gt_84: { type: "number", description: "Number of beneficiaries over 84 years old" },
+            beneficiary_female_count: { type: "number", description: "Number of female beneficiaries" },
+            beneficiary_male_count: { type: "number", description: "Number of male beneficiaries" },
+            beneficiary_race_white: { type: "number", description: "Number of white beneficiaries" },
+            beneficiary_race_black: { type: "number", description: "Number of black beneficiaries" },
+            beneficiary_race_api: { type: "number", description: "Number of Asian/Pacific Islander beneficiaries" },
+            beneficiary_race_hispanic: { type: "number", description: "Number of Hispanic beneficiaries" },
+            beneficiary_race_native: { type: "number", description: "Number of Native American beneficiaries" },
+            beneficiary_race_other: { type: "number", description: "Number of beneficiaries of other races" },
+            beneficiary_dual_count: { type: "number", description: "Number of dual-eligible beneficiaries (eligible for both Medicare and Medicaid)" },
+            beneficiary_non_dual_count: { type: "number", description: "Number of non-dual-eligible beneficiaries" },
+            beneficiary_average_risk_score: { type: "number", description: "Average risk score of beneficiaries (higher scores indicate more complex medical conditions)" }
+          }
+        }
+      }
+    }
+  },
+  examples: [
+    {
+      name: 'Search for office visit codes by state (2023 data)',
+      description: 'Search for office visit codes by state (2023 data)',
+      input: { "dataset_type": "geography_and_service", "year": "2023", "hcpcs_code": "99213", "geo_level": "State", "geo_code": "CA", "size": 5, "sort_by": "Tot_Srvcs", "sort_order": "desc" },
+      output: { "total": 5, "providers": [{ "npi": "1234567890", "provider_name": "Dr. Jane Smith", "provider_type": "Family Practice", "provider_address": "789 Health St", "provider_city": "Los Angeles", "provider_state": "CA", "provider_zip": "90001", "provider_country": "US", "medicare_participating": "Y", "total_hcpcs_codes": 10, "total_beneficiaries": 100, "total_services": 500, "total_submitted_charges": 50000, "total_medicare_allowed": 40000, "total_medicare_payment": 35000, "total_medicare_standardized": 34000, "beneficiary_average_age": 70, "beneficiary_age_lt_65": 20, "beneficiary_age_65_74": 30, "beneficiary_age_75_84": 25, "beneficiary_age_gt_84": 25, "beneficiary_female_count": 55, "beneficiary_male_count": 45, "beneficiary_race_white": 60, "beneficiary_race_black": 10, "beneficiary_race_api": 15, "beneficiary_race_hispanic": 10, "beneficiary_race_native": 2, "beneficiary_race_other": 3, "beneficiary_dual_count": 15, "beneficiary_non_dual_count": 85, "beneficiary_average_risk_score": 1.2 }] }
+    },
+    {
+      name: 'Search for providers by specialty with pagination',
+      description: 'Search for providers by specialty with pagination',
+      input: { "dataset_type": "provider", "provider_type": "Podiatry", "geo_level": "State", "geo_code": "NY", "size": 10, "offset": 20, "sort_by": "Tot_Mdcr_Pymt_Amt", "sort_order": "desc" },
+      output: { "total": 10, "providers": [{ "npi": "0987654321", "provider_name": "Dr. John Doe", "provider_type": "Podiatry", "provider_address": "123 Foot Ave", "provider_city": "New York", "provider_state": "NY", "provider_zip": "10001", "provider_country": "US", "medicare_participating": "Y", "total_hcpcs_codes": 8, "total_beneficiaries": 80, "total_services": 400, "total_submitted_charges": 40000, "total_medicare_allowed": 32000, "total_medicare_payment": 28000, "total_medicare_standardized": 27000, "beneficiary_average_age": 65, "beneficiary_age_lt_65": 15, "beneficiary_age_65_74": 25, "beneficiary_age_75_84": 20, "beneficiary_age_gt_84": 20, "beneficiary_female_count": 45, "beneficiary_male_count": 35, "beneficiary_race_white": 50, "beneficiary_race_black": 8, "beneficiary_race_api": 12, "beneficiary_race_hispanic": 8, "beneficiary_race_native": 1, "beneficiary_race_other": 1, "beneficiary_dual_count": 10, "beneficiary_non_dual_count": 70, "beneficiary_average_risk_score": 1.1 }] }
+    },
+    {
+      name: 'Search for specific procedure by place of service',
+      description: 'Search for specific procedure by place of service',
+      input: { "dataset_type": "provider_and_service", "hcpcs_code": "45378", "place_of_service": "O", "size": 5, "sort_by": "Tot_Srvcs", "sort_order": "desc" },
+      output: { "total": 5, "providers": [{ "npi": "1122334455", "provider_name": "Dr. Alice Johnson", "provider_type": "Gastroenterology", "provider_address": "456 Digestive Blvd", "provider_city": "Chicago", "provider_state": "IL", "provider_zip": "60601", "provider_country": "US", "medicare_participating": "Y", "total_hcpcs_codes": 12, "total_beneficiaries": 120, "total_services": 600, "total_submitted_charges": 60000, "total_medicare_allowed": 48000, "total_medicare_payment": 42000, "total_medicare_standardized": 41000, "beneficiary_average_age": 68, "beneficiary_age_lt_65": 25, "beneficiary_age_65_74": 35, "beneficiary_age_75_84": 30, "beneficiary_age_gt_84": 30, "beneficiary_female_count": 60, "beneficiary_male_count": 60, "beneficiary_race_white": 70, "beneficiary_race_black": 15, "beneficiary_race_api": 20, "beneficiary_race_hispanic": 15, "beneficiary_race_native": 3, "beneficiary_race_other": 3, "beneficiary_dual_count": 20, "beneficiary_non_dual_count": 100, "beneficiary_average_risk_score": 1.3 }] }
+    },
+    {
+      name: 'Get total knee replacement procedures in California (2023)',
+      description: 'Search for all providers performing knee replacements (HCPCS 27447) in California, sorted by total services to get the top 100 providers',
+      input: { "dataset_type": "provider_and_service", "year": "2023", "hcpcs_code": "27447", "geo_level": "State", "geo_code": "CA", "size": 100, "sort_by": "Tot_Srvcs", "sort_order": "desc" },
+      output: { "total": 100, "providers": [{ "npi": "1234567890", "provider_name": "Dr. John Smith", "provider_type": "Orthopedic Surgery", "provider_address": "123 Medical Center Dr", "provider_city": "Los Angeles", "provider_state": "CA", "provider_zip": "90024", "provider_country": "US", "medicare_participating": "Y", "total_hcpcs_codes": 15, "total_beneficiaries": 95, "total_services": 120, "total_submitted_charges": 1200000, "total_medicare_allowed": 960000, "total_medicare_payment": 840000, "total_medicare_standardized": 820000, "beneficiary_average_age": 72, "beneficiary_age_lt_65": 15, "beneficiary_age_65_74": 35, "beneficiary_age_75_84": 30, "beneficiary_age_gt_84": 20, "beneficiary_female_count": 65, "beneficiary_male_count": 30, "beneficiary_race_white": 70, "beneficiary_race_black": 5, "beneficiary_race_api": 10, "beneficiary_race_hispanic": 10, "beneficiary_race_native": 1, "beneficiary_race_other": 4, "beneficiary_dual_count": 10, "beneficiary_non_dual_count": 85, "beneficiary_average_risk_score": 1.2 }], "total_services": 4958 }
+    }
+  ]
+};
+
+interface ICD10CMResponse {
+  total: number;
+  codes: Array<[string, string]>;
+  displayData: Array<[string, string]>;
+}
+
+interface MedicareProviderGeographyResponse {
+  Rndrng_Prvdr_Geo_Lvl: string;
+  Rndrng_Prvdr_Geo_Cd: string;
+  Rndrng_Prvdr_Geo_Desc: string;
+  HCPCS_Cd: string;
+  HCPCS_Desc: string;
+  HCPCS_Drug_Ind: string;
+  Place_Of_Srvc: string;
+  Tot_Rndrng_Prvdrs: number;
+  Tot_Benes: number;
+  Tot_Srvcs: number;
+  Tot_Bene_Day_Srvcs: number;
+  Avg_Sbmtd_Chrg: number;
+  Avg_Mdcr_Alowd_Amt: number;
+  Avg_Mdcr_Pymt_Amt: number;
+  Avg_Mdcr_Stdzd_Amt: number;
+}
+
+interface MedicareProviderIndividualResponse {
+  Rndrng_NPI: string;
+  Rndrng_Prvdr_Last_Org_Name: string;
+  Rndrng_Prvdr_First_Name: string;
+  Rndrng_Prvdr_MI: string;
+  Rndrng_Prvdr_Crdntls: string;
+  Rndrng_Prvdr_Ent_Cd: string;
+  Rndrng_Prvdr_St1: string;
+  Rndrng_Prvdr_St2: string;
+  Rndrng_Prvdr_City: string;
+  Rndrng_Prvdr_State_Abrvtn: string;
+  Rndrng_Prvdr_State_FIPS: string;
+  Rndrng_Prvdr_Zip5: string;
+  Rndrng_Prvdr_RUCA: string;
+  Rndrng_Prvdr_RUCA_Desc: string;
+  Rndrng_Prvdr_Cntry: string;
+  Rndrng_Prvdr_Type: string;
+  Rndrng_Prvdr_Mdcr_Prtcptg_Ind: string;
+  HCPCS_Cd: string;
+  HCPCS_Desc: string;
+  HCPCS_Drug_Ind: string;
+  Place_Of_Srvc: string;
+  Tot_Benes: number;
+  Tot_Srvcs: number;
+  Tot_Bene_Day_Srvcs: number;
+  Avg_Sbmtd_Chrg: number;
+  Avg_Mdcr_Alowd_Amt: number;
+  Avg_Mdcr_Pymt_Amt: number;
+  Avg_Mdcr_Stdzd_Amt: number;
+}
+
+interface MedicareProviderResponse {
+  Rndrng_NPI: string;
+  Rndrng_Prvdr_Last_Org_Name: string;
+  Rndrng_Prvdr_First_Name: string;
+  Rndrng_Prvdr_MI: string;
+  Rndrng_Prvdr_Crdntls: string;
+  Rndrng_Prvdr_Ent_Cd: string;
+  Rndrng_Prvdr_St1: string;
+  Rndrng_Prvdr_St2: string;
+  Rndrng_Prvdr_City: string;
+  Rndrng_Prvdr_State_Abrvtn: string;
+  Rndrng_Prvdr_State_FIPS: string;
+  Rndrng_Prvdr_Zip5: string;
+  Rndrng_Prvdr_RUCA: string;
+  Rndrng_Prvdr_RUCA_Desc: string;
+  Rndrng_Prvdr_Cntry: string;
+  Rndrng_Prvdr_Type: string;
+  Rndrng_Prvdr_Mdcr_Prtcptg_Ind: string;
+  Tot_HCPCS_Cds: string;
+  Tot_Benes: number;
+  Tot_Srvcs: number;
+  Tot_Sbmtd_Chrg: number;
+  Tot_Mdcr_Alowd_Amt: number;
+  Tot_Mdcr_Pymt_Amt: number;
+  Tot_Mdcr_Stdzd_Amt: number;
+  Bene_Avg_Age: number;
+  Bene_Age_LT_65_Cnt: number;
+  Bene_Age_65_74_Cnt: number;
+  Bene_Age_75_84_Cnt: number;
+  Bene_Age_GT_84_Cnt: number;
+  Bene_Feml_Cnt: number;
+  Bene_Male_Cnt: number;
+  Bene_Race_Wht_Cnt: number;
+  Bene_Race_Black_Cnt: number;
+  Bene_Race_API_Cnt: number;
+  Bene_Race_Hspnc_Cnt: number;
+  Bene_Race_NatInd_Cnt: number;
+  Bene_Race_Othr_Cnt: number;
+  Bene_Dual_Cnt: number;
+  Bene_Ndual_Cnt: number;
+  Bene_Avg_Risk_Scre: number;
+}
+
+async function searchICD10CM(
+  terms: string,
+  maxList: number = 500,
+  count: number = 500,
+  offset: number = 0,
+  q?: string,
+  df: string = "code,name",
+  sf: string = "code,name",
+  cf: string = "code",
+  ef?: string
+) {
+  const query = new URLSearchParams({
+    terms,
+    maxList: maxList.toString(),
+    count: count.toString(),
+    offset: offset.toString(),
+    df,
+    sf,
+    cf
+  });
+  if (q) {
+    query.append("q", q);
+  }
+  if (ef) query.append("ef", ef);
+
+  const fullUrl = `${NLM_API_BASE_URL}/search?${query.toString()}`;
+
+  const response = await fetch(fullUrl);
+  const raw = await response.text();
+  const data = JSON.parse(raw);
+
+  // Prepare extra fields if present
+  const extraFields: Record<string, any[]> = {};
+  if (ef && data[2]) {
+    Object.assign(extraFields, data[2]);
+  }
+
+  const codes = data[1].map((code: string, index: number) => {
+    const result: any = {
+      code,
+      name: Array.isArray(data[3]?.[index]) ? data[3][index][1] : undefined
+    };
+    // Attach extra fields if present
+    if (extraFields && Object.keys(extraFields).length > 0) {
+      for (const [field, values] of Object.entries(extraFields)) {
+        result[field] = values[index];
+      }
+    }
+    return result;
+  });
+  return {
+    total: data[0],
+    codes
+  };
+}
+
+async function searchNPI(
+  terms: string,
+  maxList: number = 500,
+  count: number = 500,
+  offset: number = 0,
+  q?: string,
+  df: string = "NPI,name.full,provider_type,addr_practice.full",
+  sf: string = "NPI,name.full,provider_type,addr_practice.full",
+  cf: string = "NPI",
+  ef?: string
+) {
+  const query = new URLSearchParams({
+    terms,
+    maxList: maxList.toString(),
+    count: count.toString(),
+    offset: offset.toString(),
+    df,
+    sf,
+    cf
+  });
+  if (q) query.append("q", q);
+  if (ef) query.append("ef", ef);
+
+  const fullUrl = `${NPI_API_BASE_URL}/search?${query.toString()}`;
+
+  const response = await fetch(fullUrl);
+  const raw = await response.text();
+  const data = JSON.parse(raw);
+
+  // Prepare extra fields if present
+  const extraFields: Record<string, any[]> = {};
+  if (ef && data[2]) {
+    Object.assign(extraFields, data[2]);
+  }
+
+  const providers = data[1].map((npi: string, index: number) => {
+    const displayData = data[3]?.[index] || [];
+    const result: any = {
+      npi,
+      name: displayData[1] || '',
+      type: displayData[2] || '',
+      address: displayData[3] || ''
+    };
+    // Attach extra fields if present
+    if (extraFields && Object.keys(extraFields).length > 0) {
+      for (const [field, values] of Object.entries(extraFields)) {
+        result[field] = values[index];
+      }
+    }
+    return result;
+  });
+  return {
+    total: data[0],
+    providers
+  };
+}
+
+async function searchMedicare(
+  dataset_type: string = "geography_and_service",
+  year?: string,
+  hcpcs_code?: string,
+  geo_level?: string,
+  geo_code?: string,
+  place_of_service?: string,
+  size: number = 10,
+  offset: number = 0,
+  text_search?: string,
+  sort?: { field: string; direction: 'asc' | 'desc' },
+  provider_type?: string
+) {
+  let datasetVersionId: string;
+  let selectedYear: string;
+  if (dataset_type === "geography_and_service") {
+    selectedYear = year || getLatestYear(versionMapGeography);
+    datasetVersionId = versionMapGeography[selectedYear];
+  } else if (dataset_type === "provider_and_service") {
+    selectedYear = year || getLatestYear(versionMapProviderAndService);
+    datasetVersionId = versionMapProviderAndService[selectedYear];
+  } else if (dataset_type === "provider") {
+    selectedYear = year || getLatestYear(versionMapProvider);
+    datasetVersionId = versionMapProvider[selectedYear];
+  } else {
+    throw new Error(`Invalid dataset_type: ${dataset_type}`);
+  }
+
+  if (!datasetVersionId) {
+    throw new Error(`Invalid year specified: ${selectedYear} for dataset_type: ${dataset_type}`);
+  }
+
+  const query = new URLSearchParams({
+    size: Math.min(size, 5000).toString(),
+    offset: offset.toString()
+  });
+
+  // Add filters using the CMS API filter syntax
+  if (geo_level && geo_code) {
+    if (dataset_type === "geography_and_service") {
+      query.append("filter[Rndrng_Prvdr_Geo_Lvl]", geo_level);
+      query.append("filter[Rndrng_Prvdr_Geo_Cd]", geo_code);
+    } else {
+      // For provider_and_service and provider datasets
+      if (geo_level === "State") {
+        query.append("filter[Rndrng_Prvdr_State_Abrvtn]", geo_code);
+      } else if (geo_level === "County") {
+        query.append("filter[Rndrng_Prvdr_State_FIPS]", geo_code);
+      } else if (geo_level === "ZIP") {
+        query.append("filter[Rndrng_Prvdr_Zip5]", geo_code);
+      }
+    }
+  }
+
+  if (hcpcs_code && (dataset_type === "geography_and_service" || dataset_type === "provider_and_service")) {
+    query.append("filter[HCPCS_Cd]", hcpcs_code);
+  }
+
+  if (place_of_service && (dataset_type === "geography_and_service" || dataset_type === "provider_and_service")) {
+    query.append("filter[Place_Of_Srvc]", place_of_service);
+  }
+
+  if (provider_type && (dataset_type === "provider_and_service" || dataset_type === "provider")) {
+    query.append("filter[Rndrng_Prvdr_Type]", provider_type);
+  }
+
+  if (text_search) {
+    // Add text search filter for relevant fields based on dataset type
+    if (dataset_type === "provider" || dataset_type === "provider_and_service") {
+      query.append("Rndrng_Prvdr_Last_Org_Name", text_search);
+      query.append("Rndrng_Prvdr_First_Name", text_search);
+    }
+    if (dataset_type === "geography_and_service" || dataset_type === "provider_and_service") {
+      query.append("HCPCS_Desc", text_search);
+    }
+  }
+
+  if (sort) {
+    query.append("sort", `${sort.direction === 'desc' ? '-' : ''}${sort.field}`);
+  }
+
+  const url = `https://data.cms.gov/data-api/v1/dataset/${datasetVersionId}/data?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+  const data = await response.json() as (MedicareProviderGeographyResponse[] | MedicareProviderIndividualResponse[] | MedicareProviderResponse[]);
+
+  return {
+    total: data.length,
+    providers: data.map((item) => {
+      if (dataset_type === "provider") {
+        const providerItem = item as MedicareProviderResponse;
+        return {
+          npi: providerItem.Rndrng_NPI,
+          provider_name: `${providerItem.Rndrng_Prvdr_Last_Org_Name}, ${providerItem.Rndrng_Prvdr_First_Name}${providerItem.Rndrng_Prvdr_MI ? ` ${providerItem.Rndrng_Prvdr_MI}` : ''}`,
+          provider_type: providerItem.Rndrng_Prvdr_Type,
+          provider_address: providerItem.Rndrng_Prvdr_St1,
+          provider_city: providerItem.Rndrng_Prvdr_City,
+          provider_state: providerItem.Rndrng_Prvdr_State_Abrvtn,
+          provider_zip: providerItem.Rndrng_Prvdr_Zip5,
+          provider_country: providerItem.Rndrng_Prvdr_Cntry,
+          medicare_participating: providerItem.Rndrng_Prvdr_Mdcr_Prtcptg_Ind,
+          total_hcpcs_codes: parseInt(providerItem.Tot_HCPCS_Cds),
+          total_beneficiaries: providerItem.Tot_Benes,
+          total_services: providerItem.Tot_Srvcs,
+          total_submitted_charges: providerItem.Tot_Sbmtd_Chrg,
+          total_medicare_allowed: providerItem.Tot_Mdcr_Alowd_Amt,
+          total_medicare_payment: providerItem.Tot_Mdcr_Pymt_Amt,
+          total_medicare_standardized: providerItem.Tot_Mdcr_Stdzd_Amt,
+          beneficiary_average_age: providerItem.Bene_Avg_Age,
+          beneficiary_age_lt_65: providerItem.Bene_Age_LT_65_Cnt,
+          beneficiary_age_65_74: providerItem.Bene_Age_65_74_Cnt,
+          beneficiary_age_75_84: providerItem.Bene_Age_75_84_Cnt,
+          beneficiary_age_gt_84: providerItem.Bene_Age_GT_84_Cnt,
+          beneficiary_female_count: providerItem.Bene_Feml_Cnt,
+          beneficiary_male_count: providerItem.Bene_Male_Cnt,
+          beneficiary_race_white: providerItem.Bene_Race_Wht_Cnt,
+          beneficiary_race_black: providerItem.Bene_Race_Black_Cnt,
+          beneficiary_race_api: providerItem.Bene_Race_API_Cnt,
+          beneficiary_race_hispanic: providerItem.Bene_Race_Hspnc_Cnt,
+          beneficiary_race_native: providerItem.Bene_Race_NatInd_Cnt,
+          beneficiary_race_other: providerItem.Bene_Race_Othr_Cnt,
+          beneficiary_dual_count: providerItem.Bene_Dual_Cnt,
+          beneficiary_non_dual_count: providerItem.Bene_Ndual_Cnt,
+          beneficiary_average_risk_score: providerItem.Bene_Avg_Risk_Scre
+        };
+      }
+
+      if (dataset_type === "geography_and_service") {
+        const geoItem = item as MedicareProviderGeographyResponse;
+        return {
+          hcpcs_code: geoItem.HCPCS_Cd,
+          hcpcs_desc: geoItem.HCPCS_Desc,
+          hcpcs_drug_ind: geoItem.HCPCS_Drug_Ind,
+          place_of_service: geoItem.Place_Of_Srvc,
+          total_beneficiaries: geoItem.Tot_Benes,
+          total_services: geoItem.Tot_Srvcs,
+          total_beneficiary_days: geoItem.Tot_Bene_Day_Srvcs,
+          avg_submitted_charge: geoItem.Avg_Sbmtd_Chrg,
+          avg_medicare_allowed: geoItem.Avg_Mdcr_Alowd_Amt,
+          avg_medicare_payment: geoItem.Avg_Mdcr_Pymt_Amt,
+          avg_medicare_standardized: geoItem.Avg_Mdcr_Stdzd_Amt,
+          geo_level: geoItem.Rndrng_Prvdr_Geo_Lvl,
+          geo_code: geoItem.Rndrng_Prvdr_Geo_Cd,
+          geo_desc: geoItem.Rndrng_Prvdr_Geo_Desc,
+          total_providers: geoItem.Tot_Rndrng_Prvdrs
+        };
+      } else {
+        const providerItem = item as MedicareProviderIndividualResponse;
+        return {
+          hcpcs_code: providerItem.HCPCS_Cd,
+          hcpcs_desc: providerItem.HCPCS_Desc,
+          hcpcs_drug_ind: providerItem.HCPCS_Drug_Ind,
+          place_of_service: providerItem.Place_Of_Srvc,
+          total_beneficiaries: providerItem.Tot_Benes,
+          total_services: providerItem.Tot_Srvcs,
+          total_beneficiary_days: providerItem.Tot_Bene_Day_Srvcs,
+          avg_submitted_charge: providerItem.Avg_Sbmtd_Chrg,
+          avg_medicare_allowed: providerItem.Avg_Mdcr_Alowd_Amt,
+          avg_medicare_payment: providerItem.Avg_Mdcr_Pymt_Amt,
+          avg_medicare_standardized: providerItem.Avg_Mdcr_Stdzd_Amt,
+          npi: providerItem.Rndrng_NPI,
+          provider_name: `${providerItem.Rndrng_Prvdr_Last_Org_Name}, ${providerItem.Rndrng_Prvdr_First_Name}${providerItem.Rndrng_Prvdr_MI ? ` ${providerItem.Rndrng_Prvdr_MI}` : ''}`,
+          provider_type: providerItem.Rndrng_Prvdr_Type,
+          provider_address: providerItem.Rndrng_Prvdr_St1,
+          provider_city: providerItem.Rndrng_Prvdr_City,
+          provider_state: providerItem.Rndrng_Prvdr_State_Abrvtn,
+          provider_zip: providerItem.Rndrng_Prvdr_Zip5,
+          provider_country: providerItem.Rndrng_Prvdr_Cntry,
+          medicare_participating: providerItem.Rndrng_Prvdr_Mdcr_Prtcptg_Ind
+        };
+      }
+    })
+  };
+}
+
+async function searchHCPCS(
+  terms: string,
+  maxList: number = 100,
+  count: number = 100,
+  offset: number = 0,
+  q?: string,
+  df: string = "code,display",
+  sf: string = "code,name",
+  cf: string = "code",
+  ef?: string
+) {
+  const query = new URLSearchParams({
+    terms,
+    maxList: maxList.toString(),
+    count: count.toString(),
+    offset: offset.toString(),
+    df,
+    sf,
+    cf
+  });
+  if (q) {
+    query.append("q", q);
+  }
+  if (ef) query.append("ef", ef);
+
+  const fullUrl = `${HCPCS_API_BASE_URL}/search?${query.toString()}`;
+  const response = await fetch(fullUrl);
+  const data = await response.json() as [number, string[], null, Array<[string, string]>];
+  const [total, codes, , displayData] = data;
+  
+  return {
+    total,
+    codes: displayData.map(([code, display]) => ({
+      code,
+      name: display
+    }))
+  };
+}
+
+function sendError(res: http.ServerResponse, message: string, code: number = 400) {
+  res.writeHead(code, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: message, code }));
+}
+
+async function runServer() {
+  if (!USE_HTTP) {
+    // MCP mode (stdio only)
+    const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
+    const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
+    const { CallToolRequestSchema, ListToolsRequestSchema, McpError } = await import('@modelcontextprotocol/sdk/types.js');
+
+    // Initialize server without any console output
+    const transport = new StdioServerTransport();
+    const server = new Server(
+      { name: "mcp-healthcare-data", version: "0.2.14" },
+      { capabilities: { tools: {} } }
+    );
+
+    // Set up request handlers
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: [
+        {
+          name: "nlm_search_icd10",
+          description: "Search for ICD-10-CM codes using the National Library of Medicine (NLM) API",
+          inputSchema: {
+            type: "object",
+            properties: {
+              terms: { type: "string", description: "The search string for which to find matches in the list." },
+              maxList: { type: "number", description: "Specifies the number of results requested, up to the upper limit of 500.", default: 500 },
+              count: { type: "number", description: "The number of results to retrieve (page size).", default: 500 },
+              offset: { type: "number", description: "The starting result number (0-based) to retrieve.", default: 0 },
+              q: { type: "string", description: "An optional, additional query string used to further constrain the results." },
+              df: { type: "string", description: "A comma-separated list of display fields.", default: "code,name" },
+              sf: { type: "string", description: "A comma-separated list of fields to be searched.", default: "code,name" },
+              cf: { type: "string", description: "A field to regard as the 'code' for the returned item data.", default: "code" },
+              ef: { type: "string", description: "A comma-separated list of additional fields to be returned for each retrieved list item." }
+            },
+            required: ["terms"]
+          },
+          examples: [
+            {
+              name: "Limit results for injury diagnoses",
+              description: "Returns only the first 3 results for 'injury' using maxList.",
+              input: { terms: "injury", sf: "code,name", maxList: 3 },
+              output: {
+                total: 4330,
+                codes: [
+                  { code: "P15.2", name: "Sternomastoid injury due to birth injury" },
+                  { code: "F40.233", name: "Fear of injury" },
+                  { code: "P15.9", name: "Birth injury, unspecified" }
+                ]
+              }
+            },
+            {
+              name: "Paginate fracture diagnoses",
+              description: "Returns 2 results for 'fracture' starting from the second result (offset=1, count=2).",
+              input: { terms: "fracture", sf: "code,name", count: 2, offset: 1 },
+              output: {
+                total: 17895,
+                codes: [
+                  { code: "M84.454A", name: "Pathological fracture, pelvis, initial encounter for fracture" },
+                  { code: "S92.151A", name: "Displaced avulsion fracture (chip fracture) of right talus, initial encounter for closed fracture" }
+                ]
+              }
+            },
+            {
+              name: "Filter neoplasm codes by pattern",
+              description: "Returns neoplasm codes starting with C80 using the q parameter.",
+              input: { terms: "neoplasm", sf: "code,name", q: "code:C80*" },
+              output: {
+                total: 3,
+                codes: [
+                  { code: "C80.0", name: "Disseminated malignant neoplasm, unspecified" },
+                  { code: "C80.1", name: "Malignant (primary) neoplasm, unspecified" },
+                  { code: "C80.2", name: "Malignant neoplasm associated with transplanted organ" }
+                ]
+              }
+            },
+            {
+              name: "Custom display fields for infection",
+              description: "Returns 1 result for 'infection' with custom display fields (df) and count=1.",
+              input: { terms: "infection", sf: "code,name", df: "code,name", count: 1 },
+              output: {
+                total: 493,
+                codes: [
+                  { code: "K94.02", name: "Colostomy infection" }
+                ]
+              }
+            },
+            {
+              name: "Paginate asthma diagnoses",
+              description: "Returns 2 asthma results starting from the third result (offset=2, count=2).",
+              input: { terms: "asthma", sf: "code,name", count: 2, offset: 2 },
+              output: {
+                total: 19,
+                codes: [
+                  { code: "J45.909", name: "Unspecified asthma, uncomplicated" },
+                  { code: "J45.991", name: "Cough variant asthma" }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          name: "nlm_search_npi_org",
+          description: `Search for healthcare providers using the National Library of Medicine's (NLM) National Provider Identifier (NPI) database. Supports filtering by name, location, provider type, and other criteria.\n\n**All available fields:**\n- NPI\n- provider_type\n- name.full, name.last, name.first, name.middle, name.credential, name.prefix, name.suffix\n- addr_practice.full, addr_practice.line1, addr_practice.line2, addr_practice.city, addr_practice.state, addr_practice.zip, addr_practice.phone, addr_practice.fax, addr_practice.country\n- addr_mailing.full, addr_mailing.line1, addr_mailing.line2, addr_mailing.city, addr_mailing.state, addr_mailing.zip, addr_mailing.phone, addr_mailing.fax, addr_mailing.country\n- name_other.full, name_other.last, name_other.first, name_other.middle, name_other.credential, name_other.prefix, name_other.suffix\n- licenses.taxonomy.code, licenses.taxonomy.grouping, licenses.taxonomy.classification, licenses.taxonomy.specialization\n- licenses.medicare.spc_code, licenses.medicare.type\n- other_ids.id, other_ids.type, other_ids.issuer, other_ids.state\n- misc.auth_official.last, misc.auth_official.first, misc.auth_official.middle, misc.auth_official.credential, misc.auth_official.title, misc.auth_official.prefix, misc.auth_official.suffix, misc.auth_official.phone\n- misc.replacement_NPI, misc.EIN, misc.enumeration_date, misc.last_update_date, misc.is_sole_proprietor, misc.is_org_subpart, misc.parent_LBN, misc.parent_TIN\n\nFor a full list of fields and advanced usage, see the [NLM NPI API documentation](https://clinicaltables.nlm.nih.gov/apidoc/npi_org/v3/doc.html).`,
+          inputSchema: {
+            type: "object",
+            properties: {
+              terms: { type: "string", description: "Search terms (name, NPI, or other identifiers). Multiple words are ANDed together." },
+              maxList: { type: "number", description: "Maximum number of results to return (default: 500)." },
+              count: { type: "number", description: "Number of results per page (default: 500). Use for pagination." },
+              offset: { type: "number", description: "Starting result number (default: 0). Use for pagination." },
+              q: { type: "string", description: "Additional query constraints. Examples:\n" +
+                "- `addr_practice.city:Bethesda`\n" +
+                "- `provider_type:Physician`\n" +
+                "- `provider_type:Organization`\n" +
+                "- `addr_practice.state:NY AND provider_type:Individual`" },
+              df: { type: "string", description: "Comma-separated list of fields to display in results." },
+              sf: { type: "string", description: "Comma-separated list of fields to search in." },
+              ef: { type: "string", description: "Comma-separated list of extra fields to include." }
+            },
+            required: ["terms"]
+          },
+          examples: [
+            {
+              name: "Limit results for providers named Smith",
+              description: "Returns only the first 2 results for 'smith' using maxList.",
+              input: { terms: "smith", maxList: 2 },
+              output: {
+                total: 5899,
+                providers: [
+                  { NPI: "1700019239", name: "SMITH & SMITH, PLLC", provider_type: "Nurse Practitioner", address: "2955 HARRISON STREET SUITE 301, BEAUMONT, TX 77702" },
+                  { NPI: "1780383257", name: "SMITH & SMITH CONSULTING LLC", provider_type: "Mental Health Counselor", address: "7367 PEPPER CRK, WEST BLOOMFIELD, MI 48322" }
+                ]
+              }
+            },
+            {
+              name: "Paginate cardiology providers",
+              description: "Returns 2 cardiology-related providers starting from the second result (offset=1, count=2).",
+              input: { terms: "cardiology", count: 2, offset: 1 },
+              output: {
+                total: 10000,
+                providers: [
+                  { NPI: "1922111913", name: "SOUTHEAST CARDIOLOGY", provider_type: "Specialist", address: "1812 WALLACE SCHOOL RD STE 300, CHARLESTON, SC 29407" },
+                  { NPI: "1386616951", name: "CARDIOLOGY CONSULTANTS", provider_type: "Physician/Cardiovascular Disease (Cardiology)", address: "19 BRADHURST AVE, HAWTHORNE, NY 10532" }
+                ]
+              }
+            },
+            {
+              name: "Filter Smith providers by physician type",
+              description: "Returns 2 providers named 'john' filtered by provider_type:Physician using the q parameter.",
+              input: { terms: "john", q: "provider_type:Physician", count: 2 },
+              output: {
+                total: 4539,
+                providers: [
+                  { NPI: "1093892143", name: "JOHN HOUSTON", provider_type: "Physician/Urology", address: "2308 N LINCOLN AVE, CHICAGO, IL 60614" },
+                  { NPI: "1275692253", name: "JOHN W.GHRAMM", provider_type: "Physician/Obstetrics & Gynecology", address: "1804 W PLAZA DR, WINCHESTER, VA 22601" }
+                ]
+              }
+            },
+            {
+              name: "Custom display fields for clinics",
+              description: "Returns 1 clinic with custom display fields (df) and count=1.",
+              input: { terms: "clinic", df: "NPI,name.full,provider_type,addr_practice.city", count: 1 },
+              output: {
+                total: 10000,
+                providers: [
+                  { NPI: "1295848521", name: "SANFORD CLINIC", provider_type: "Physician/Internal Medicine", address: "SIOUX FALLS" }
+                ]
+              }
+            },
+            {
+              name: "Paginate university providers",
+              description: "Returns 2 university-related providers starting from the third result (offset=2, count=2).",
+              input: { terms: "university", offset: 2, count: 2 },
+              output: {
+                total: 10000,
+                providers: [
+                  { NPI: "1962565242", name: "DREXEL UNIVERSITY", provider_type: "Ambulatory Surgical Center", address: "219 N BROAD ST 5TH FLOOR, PHILADELPHIA, PA 19107" },
+                  { NPI: "1336420793", name: "NEWMAN UNIVERSITY", provider_type: "Physician/Family Practice", address: "3100 MCCORMICK ST, WICHITA, KS 67213" }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          name: "cms_search_providers",
+          description: "Search Medicare Physician & Other Practitioners data using the Centers for Medicare & Medicaid Services (CMS) database. This data includes information about services and procedures provided to Original Medicare Part B beneficiaries.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              dataset_type: {
+                type: "string",
+                description: "Type of dataset to search. Options:\n" +
+                  "- 'geography_and_service': Use when you need to compare regions, analyze geographic patterns, study regional variations in healthcare delivery, understand geographic distribution of healthcare services, or calculate per-capita/per-beneficiary rates by region.\n" +
+                  "- 'provider_and_service': Use when you need to analyze individual provider performance, track specific procedures by provider, calculate total procedures across providers, or study provider-level service patterns and outcomes.\n" +
+                  "- 'provider': Use when you need to analyze provider demographics, study provider participation in Medicare, understand provider practice patterns, or examine provider-level beneficiary characteristics and risk scores."
+              },
+              year: {
+                type: "string",
+                description: "Year of the dataset to query (2013 to latest available year, defaults to latest year)."
+              },
+              hcpcs_code: {
+                type: "string",
+                description: "HCPCS code to search for (e.g., '99213' for established patient office visit)."
+              },
+              provider_type: {
+                type: "string",
+                description: "Type of provider to search for (e.g., 'Cardiology', 'Podiatry', 'Family Practice')."
+              },
+              geo_level: {
+                type: "string",
+                description: "Geographic level for filtering (e.g., 'National', 'State', 'County', 'ZIP')."
+              },
+              geo_code: {
+                type: "string",
+                description: "Geographic code to filter by (e.g., 'CA' for California, '06037' for Los Angeles County)."
+              },
+              place_of_service: {
+                type: "string",
+                description: "Place of service code to filter by (e.g., 'F' for facility, 'O' for office, 'H' for hospital)."
+              },
+              size: {
+                type: "number",
+                description: "Number of results to return (default: 10, max: 5000)."
+              },
+              offset: {
+                type: "number",
+                description: "Starting result number for pagination (default: 0)."
+              },
+              sort_by: {
+                type: "string",
+                description: "Field to sort results by (e.g., 'Tot_Srvcs', 'Tot_Benes', 'Tot_Mdcr_Pymt_Amt')."
+              },
+              sort_order: {
+                type: "string",
+                description: "Sort order ('asc' or 'desc', default: 'desc')."
+              }
+            },
+            required: ["dataset_type"]
+          },
+          responseSchema: {
+            type: "object",
+            properties: {
+              total: {
+                type: "number",
+                description: "Total number of results found"
+              },
+              providers: {
+                type: "array",
+                description: "List of Medicare providers matching the search criteria",
+                items: {
+                  type: "object",
+                  properties: {
+                    npi: { type: "string", description: "Provider's National Provider Identifier (NPI)" },
+                    provider_name: { type: "string", description: "Provider's full name" },
+                    provider_type: { type: "string", description: "Provider's specialty or type of practice" },
+                    provider_address: { type: "string", description: "Provider's street address" },
+                    provider_city: { type: "string", description: "Provider's city" },
+                    provider_state: { type: "string", description: "Provider's state (2-letter abbreviation)" },
+                    provider_zip: { type: "string", description: "Provider's ZIP code" },
+                    provider_country: { type: "string", description: "Provider's country code (typically 'US')" },
+                    medicare_participating: { type: "string", description: "Whether the provider participates in Medicare ('Y' for yes, 'N' for no)" },
+                    total_hcpcs_codes: { type: "number", description: "Total number of unique HCPCS codes used by the provider" },
+                    total_beneficiaries: { type: "number", description: "Total number of unique Medicare beneficiaries served" },
+                    total_services: { type: "number", description: "Total number of services provided" },
+                    total_submitted_charges: { type: "number", description: "Total amount of submitted charges in dollars" },
+                    total_medicare_allowed: { type: "number", description: "Total amount allowed by Medicare in dollars" },
+                    total_medicare_payment: { type: "number", description: "Total amount paid by Medicare in dollars" },
+                    total_medicare_standardized: { type: "number", description: "Total standardized Medicare payment amount in dollars (adjusted for geographic differences)" },
+                    beneficiary_average_age: { type: "number", description: "Average age of beneficiaries served" },
+                    beneficiary_age_lt_65: { type: "number", description: "Number of beneficiaries under 65 years old" },
+                    beneficiary_age_65_74: { type: "number", description: "Number of beneficiaries aged 65-74" },
+                    beneficiary_age_75_84: { type: "number", description: "Number of beneficiaries aged 75-84" },
+                    beneficiary_age_gt_84: { type: "number", description: "Number of beneficiaries over 84 years old" },
+                    beneficiary_female_count: { type: "number", description: "Number of female beneficiaries" },
+                    beneficiary_male_count: { type: "number", description: "Number of male beneficiaries" },
+                    beneficiary_race_white: { type: "number", description: "Number of white beneficiaries" },
+                    beneficiary_race_black: { type: "number", description: "Number of black beneficiaries" },
+                    beneficiary_race_api: { type: "number", description: "Number of Asian/Pacific Islander beneficiaries" },
+                    beneficiary_race_hispanic: { type: "number", description: "Number of Hispanic beneficiaries" },
+                    beneficiary_race_native: { type: "number", description: "Number of Native American beneficiaries" },
+                    beneficiary_race_other: { type: "number", description: "Number of beneficiaries of other races" },
+                    beneficiary_dual_count: { type: "number", description: "Number of dual-eligible beneficiaries (eligible for both Medicare and Medicaid)" },
+                    beneficiary_non_dual_count: { type: "number", description: "Number of non-dual-eligible beneficiaries" },
+                    beneficiary_average_risk_score: { type: "number", description: "Average risk score of beneficiaries (higher scores indicate more complex medical conditions)" }
+                  }
+                }
+              }
+            }
+          },
+          examples: [
+            {
+              name: 'Search for office visit codes by state (2023 data)',
+              description: 'Search for office visit codes by state (2023 data)',
+              input: { "dataset_type": "geography_and_service", "year": "2023", "hcpcs_code": "99213", "geo_level": "State", "geo_code": "CA", "size": 5, "sort_by": "Tot_Srvcs", "sort_order": "desc" },
+              output: { "total": 5, "providers": [{ "npi": "1234567890", "provider_name": "Dr. Jane Smith", "provider_type": "Family Practice", "provider_address": "789 Health St", "provider_city": "Los Angeles", "provider_state": "CA", "provider_zip": "90001", "provider_country": "US", "medicare_participating": "Y", "total_hcpcs_codes": 10, "total_beneficiaries": 100, "total_services": 500, "total_submitted_charges": 50000, "total_medicare_allowed": 40000, "total_medicare_payment": 35000, "total_medicare_standardized": 34000, "beneficiary_average_age": 70, "beneficiary_age_lt_65": 20, "beneficiary_age_65_74": 30, "beneficiary_age_75_84": 25, "beneficiary_age_gt_84": 25, "beneficiary_female_count": 55, "beneficiary_male_count": 45, "beneficiary_race_white": 60, "beneficiary_race_black": 10, "beneficiary_race_api": 15, "beneficiary_race_hispanic": 10, "beneficiary_race_native": 2, "beneficiary_race_other": 3, "beneficiary_dual_count": 15, "beneficiary_non_dual_count": 85, "beneficiary_average_risk_score": 1.2 }] }
+            },
+            {
+              name: 'Search for providers by specialty with pagination',
+              description: 'Search for providers by specialty with pagination',
+              input: { "dataset_type": "provider", "provider_type": "Podiatry", "geo_level": "State", "geo_code": "NY", "size": 10, "offset": 20, "sort_by": "Tot_Mdcr_Pymt_Amt", "sort_order": "desc" },
+              output: { "total": 10, "providers": [{ "npi": "0987654321", "provider_name": "Dr. John Doe", "provider_type": "Podiatry", "provider_address": "123 Foot Ave", "provider_city": "New York", "provider_state": "NY", "provider_zip": "10001", "provider_country": "US", "medicare_participating": "Y", "total_hcpcs_codes": 8, "total_beneficiaries": 80, "total_services": 400, "total_submitted_charges": 40000, "total_medicare_allowed": 32000, "total_medicare_payment": 28000, "total_medicare_standardized": 27000, "beneficiary_average_age": 65, "beneficiary_age_lt_65": 15, "beneficiary_age_65_74": 25, "beneficiary_age_75_84": 20, "beneficiary_age_gt_84": 20, "beneficiary_female_count": 45, "beneficiary_male_count": 35, "beneficiary_race_white": 50, "beneficiary_race_black": 8, "beneficiary_race_api": 12, "beneficiary_race_hispanic": 8, "beneficiary_race_native": 1, "beneficiary_race_other": 1, "beneficiary_dual_count": 10, "beneficiary_non_dual_count": 70, "beneficiary_average_risk_score": 1.1 }] }
+            },
+            {
+              name: 'Search for specific procedure by place of service',
+              description: 'Search for specific procedure by place of service',
+              input: { "dataset_type": "provider_and_service", "hcpcs_code": "45378", "place_of_service": "O", "size": 5, "sort_by": "Tot_Srvcs", "sort_order": "desc" },
+              output: { "total": 5, "providers": [{ "npi": "1122334455", "provider_name": "Dr. Alice Johnson", "provider_type": "Gastroenterology", "provider_address": "456 Digestive Blvd", "provider_city": "Chicago", "provider_state": "IL", "provider_zip": "60601", "provider_country": "US", "medicare_participating": "Y", "total_hcpcs_codes": 12, "total_beneficiaries": 120, "total_services": 600, "total_submitted_charges": 60000, "total_medicare_allowed": 48000, "total_medicare_payment": 42000, "total_medicare_standardized": 41000, "beneficiary_average_age": 68, "beneficiary_age_lt_65": 25, "beneficiary_age_65_74": 35, "beneficiary_age_75_84": 30, "beneficiary_age_gt_84": 30, "beneficiary_female_count": 60, "beneficiary_male_count": 60, "beneficiary_race_white": 70, "beneficiary_race_black": 15, "beneficiary_race_api": 20, "beneficiary_race_hispanic": 15, "beneficiary_race_native": 3, "beneficiary_race_other": 3, "beneficiary_dual_count": 20, "beneficiary_non_dual_count": 100, "beneficiary_average_risk_score": 1.3 }] }
+            },
+            {
+              name: 'Get total knee replacement procedures in California (2023)',
+              description: 'Search for all providers performing knee replacements (HCPCS 27447) in California, sorted by total services to get the top 100 providers',
+              input: { "dataset_type": "provider_and_service", "year": "2023", "hcpcs_code": "27447", "geo_level": "State", "geo_code": "CA", "size": 100, "sort_by": "Tot_Srvcs", "sort_order": "desc" },
+              output: { "total": 100, "providers": [{ "npi": "1234567890", "provider_name": "Dr. John Smith", "provider_type": "Orthopedic Surgery", "provider_address": "123 Medical Center Dr", "provider_city": "Los Angeles", "provider_state": "CA", "provider_zip": "90024", "provider_country": "US", "medicare_participating": "Y", "total_hcpcs_codes": 15, "total_beneficiaries": 95, "total_services": 120, "total_submitted_charges": 1200000, "total_medicare_allowed": 960000, "total_medicare_payment": 840000, "total_medicare_standardized": 820000, "beneficiary_average_age": 72, "beneficiary_age_lt_65": 15, "beneficiary_age_65_74": 35, "beneficiary_age_75_84": 30, "beneficiary_age_gt_84": 20, "beneficiary_female_count": 65, "beneficiary_male_count": 30, "beneficiary_race_white": 70, "beneficiary_race_black": 5, "beneficiary_race_api": 10, "beneficiary_race_hispanic": 10, "beneficiary_race_native": 1, "beneficiary_race_other": 4, "beneficiary_dual_count": 10, "beneficiary_non_dual_count": 85, "beneficiary_average_risk_score": 1.2 }], "total_services": 4958 }
+            }
+          ]
+        },
+        {
+          name: "nlm_search_hcpcs",
+          description: "Search for HCPCS Level II codes using the National Library of Medicine (NLM) API. HCPCS Level II codes are used to identify products, supplies, and services not included in the CPT codes, such as ambulance services, durable medical equipment, prosthetics, orthotics, and supplies when used outside a physician's office.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              terms: { type: "string", description: "The search string for which to find matches in the list." },
+              maxList: { type: "number", description: "Specifies the number of results requested, up to the upper limit of 100.", default: 100 },
+              count: { type: "number", description: "The number of results to retrieve (page size).", default: 100 },
+              offset: { type: "number", description: "The starting result number (0-based) to retrieve.", default: 0 },
+              q: { type: "string", description: "An optional, additional query string used to further constrain the results." },
+              df: { type: "string", description: "A comma-separated list of display fields.", default: "code,name" },
+              sf: { type: "string", description: "A comma-separated list of fields to be searched.", default: "code,name" },
+              cf: { type: "string", description: "A field to regard as the 'code' for the returned item data.", default: "code" },
+              ef: { type: "string", description: "A comma-separated list of additional fields to be returned for each retrieved list item." }
+            },
+            required: ["terms"]
+          },
+          examples: [
+            {
+              name: "Search for wheelchair codes",
+              description: "Returns HCPCS codes related to wheelchairs.",
+              input: { terms: "wheelchair", maxList: 3 },
+              output: {
+                total: 25,
+                codes: [
+                  { code: "E1234", name: "Wheelchair, standard" },
+                  { code: "E1235", name: "Wheelchair, heavy duty" },
+                  { code: "E1236", name: "Wheelchair, pediatric" }
+                ]
+              }
+            },
+            {
+              name: "Pagination with offset and count",
+              description: "Returns the next 2 wheelchair codes using offset and count.",
+              input: { terms: "wheelchair", maxList: 2, count: 2, offset: 2 },
+              output: {
+                total: 25,
+                codes: [
+                  { code: "E1237", name: "Wheelchair, reclining" },
+                  { code: "E1238", name: "Wheelchair, custom" }
+                ]
+              }
+            },
+            {
+              name: "Custom query filter",
+              description: "Returns air-related codes filtered by code prefix using q parameter.",
+              input: { terms: "air", maxList: 2, count: 2, offset: 0, q: "code:A*" },
+              output: {
+                total: 10,
+                codes: [
+                  { code: "A0435", name: "Fixed wing air mileage" },
+                  { code: "A0436", name: "Rotary wing air mileage" }
+                ]
+              }
+            },
+            {
+              name: "Custom display and extra fields",
+              description: "Returns bed-related codes with custom display and extra fields.",
+              input: { terms: "bed", maxList: 2, count: 2, offset: 0, q: "code:E*", df: "code,short_desc", sf: "code,short_desc,long_desc", cf: "code", ef: "long_desc" },
+              output: {
+                total: 5,
+                codes: [
+                  { code: "E0273", name: "Bed board" },
+                  { code: "E0194", name: "Air fluidized bed" }
+                ]
+              }
+            },
+            {
+              name: "Search for specific code range",
+              description: "Returns HCPCS codes in the E0100-E0999 range using the q parameter.",
+              input: { terms: "equipment", q: "code:E0100-E0999", count: 2 },
+              output: {
+                total: 150,
+                codes: [
+                  { code: "E0100", name: "Cane, standard" },
+                  { code: "E0105", name: "Crutches, standard" }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          name: "nlm_search_npi_ind",
+          description: `Search for individual healthcare providers using the National Library of Medicine's (NLM) National Provider Identifier (NPI) database for individuals. This API uses NPI data from CMS, Health Care Provider Taxonomy from NUCC, and Crosswalk Medicare Provider/Supplier to Healthcare Provider Taxonomy from CMS.\n\n**All available fields:**\n- NPI\n- provider_type\n- gender\n- name.full, name.last, name.first, name.middle, name.credential, name.prefix, name.suffix\n- addr_practice.full, addr_practice.line1, addr_practice.line2, addr_practice.city, addr_practice.state, addr_practice.zip, addr_practice.phone, addr_practice.fax, addr_practice.country\n- addr_mailing.full, addr_mailing.line1, addr_mailing.line2, addr_mailing.city, addr_mailing.state, addr_mailing.zip, addr_mailing.phone, addr_mailing.fax, addr_mailing.country\n- name_other.full, name_other.last, name_other.first, name_other.middle, name_other.credential, name_other.prefix, name_other.suffix\n- licenses.taxonomy.code, licenses.taxonomy.grouping, licenses.taxonomy.classification, licenses.taxonomy.specialization\n- licenses.medicare.spc_code, licenses.medicare.type\n- other_ids.id, other_ids.type, other_ids.issuer, other_ids.state\n- misc.auth_official.last, misc.auth_official.first, misc.auth_official.middle, misc.auth_official.credential, misc.auth_official.title, misc.auth_official.prefix, misc.auth_official.suffix, misc.auth_official.phone\n- misc.replacement_NPI, misc.EIN, misc.enumeration_date, misc.last_update_date, misc.is_sole_proprietor, misc.is_org_subpart, misc.parent_LBN, misc.parent_TIN\n\nFor a full list of fields and advanced usage, see the [NLM NPI Individual API documentation](https://clinicaltables.nlm.nih.gov/apidoc/npi_idv/v3/doc.html).`,
+          inputSchema: {
+            type: "object",
+            properties: {
+              terms: { type: "string", description: "Search terms (name, NPI, or other identifiers). Multiple words are ANDed together." },
+              maxList: { type: "number", description: "Maximum number of results to return (default: 7, max: 500)." },
+              count: { type: "number", description: "Number of results per page (default: 7, max: 500). Use for pagination." },
+              offset: { type: "number", description: "Starting result number (default: 0). Use for pagination. Note: total limit is 7,500 (offset + count)." },
+              q: { type: "string", description: "Additional query constraints. Examples:\n" +
+                "- `addr_practice.city:Bethesda`\n" +
+                "- `provider_type:Physician`\n" +
+                "- `gender:M`\n" +
+                "- `addr_practice.state:NY AND provider_type:Physician`" },
+              df: { type: "string", description: "Comma-separated list of fields to display in results (default: NPI,name.full,provider_type,addr_practice.full)." },
+              sf: { type: "string", description: "Comma-separated list of fields to search in (default: NPI,name.full,provider_type,addr_practice.full)." },
+              cf: { type: "string", description: "Field to regard as the 'code' for the returned item data (default: NPI)." },
+              ef: { type: "string", description: "Comma-separated list of extra fields to include. Can use aliases with colon syntax: field_name:alias." }
+            },
+            required: ["terms"]
+          },
+          examples: [
+            {
+              name: "Search for individual providers named John in Bethesda",
+              description: "Returns individual providers named 'john' in 'bethesda' area.",
+              input: { terms: "john bethesda", maxList: 3 },
+              output: {
+                total: 127,
+                providers: [
+                  { NPI: "1760880173", name: "JOHN KELLY", provider_type: "Dentist", gender: "M", address: "4833 BETHESDA AVE STE 302, BETHESDA, MD 20814, US" },
+                  { NPI: "1033132295", name: "JOHN STURGEON", provider_type: "Physician/Diagnostic Radiology", gender: "M", address: "6204 DUNROBBIN DR, BETHESDA, MD 20816, US" },
+                  { NPI: "1427180405", name: "JOHN GERSHEFSKI", provider_type: "Psychologist, Clinical", gender: "M", address: "6809 WHITTIER BLVD, BETHESDA, MD 20817, US" }
+                ]
+              }
+            },
+            {
+              name: "Search for female physicians",
+              description: "Returns female physicians using the q parameter.",
+              input: { terms: "smith", q: "gender:F AND provider_type:Physician", count: 2 },
+              output: {
+                total: 4539,
+                providers: [
+                  { NPI: "1093892143", name: "JANE SMITH", provider_type: "Physician/Internal Medicine", gender: "F", address: "2308 N LINCOLN AVE, CHICAGO, IL 60614" },
+                  { NPI: "1275692253", name: "MARY SMITH", provider_type: "Physician/Family Practice", gender: "F", address: "1804 W PLAZA DR, WINCHESTER, VA 22601" }
+                ]
+              }
+            },
+            {
+              name: "Search with custom display fields",
+              description: "Returns individual providers with custom display fields including gender.",
+              input: { terms: "williams", df: "NPI,name.full,provider_type,gender,addr_practice.city", count: 2 },
+              output: {
+                total: 26306,
+                providers: [
+                  { NPI: "1225588858", name: "RYAN MATTHEW ANLIKER I", provider_type: "Specialist", gender: "M", address: "WILLIAMS" },
+                  { NPI: "1023354495", name: "MARY WILLIAMS WILLIAMS", provider_type: "Social Worker", gender: "F", address: "AUGUSTA" }
+                ]
+              }
+            },
+            {
+              name: "Search with extra fields for other IDs",
+              description: "Returns individual providers with additional other_ids information.",
+              input: { terms: "williams", ef: "other_ids", count: 2 },
+              output: {
+                total: 26306,
+                providers: [
+                  { NPI: "1225588858", name: "RYAN MATTHEW ANLIKER I", provider_type: "Specialist", gender: "M", address: "18151 WILLIAMS HWY, WILLIAMS, OR 97544, US", other_ids: [{"state":"PA","type":"05","id":"282NW0100X"}] },
+                  { NPI: "1023354495", name: "MARY WILLIAMS WILLIAMS", provider_type: "Social Worker", gender: "F", address: "1 FREEDOM WAY, AUGUSTA, GA 30904, US", other_ids: [{"type":"02","id":"G91672"}] }
+                ]
+              }
+            },
+            {
+              name: "Paginate individual providers",
+              description: "Returns individual providers with pagination using offset and count.",
+              input: { terms: "john", offset: 2, count: 2 },
+              output: {
+                total: 10000,
+                providers: [
+                  { NPI: "1447647847", name: "JOHN DELANEY", provider_type: "Student in an Organized Health Care Education/Training Program", gender: "M", address: "8901 WISCONSIN AVE, BETHESDA, MD 20889, US" },
+                  { NPI: "1710044342", name: "JOHN ZINNER", provider_type: "Physician/Psychiatry", gender: "M", address: "7111 LAVEROCK LN, BETHESDA, MD 20817, US" }
+                ]
+              }
+            },
+            {
+              name: "Providers in Miami with credential 'DO', showing name, mailing address, and gender",
+              description: "Returns providers in Miami with the credential 'DO', including their full name, mailing address, and gender.",
+              input: { terms: "miami", q: "name.credential:DO AND addr_practice.city:Miami", df: "name.full,addr_mailing.full,gender", sf: "name.credential,addr_practice.city", count: 7 },
+              output: {
+                total: 834,
+                providers: [
+                  { NPI: "1275754459", name: "375 NE 54TH ST SUITE #2, MIAMI, FL 33137", gender: "M" },
+                  { NPI: "1780955906", name: "3100 SW 62ND AVE, MIAMI, FL 33155", gender: "M" },
+                  { NPI: "1245671569", name: "450 FOURTH AVE, PELHAM, NY 10803", gender: "M" },
+                  { NPI: "1679905707", name: "13707 SW 152ND STREET, MIAMI, FL 33177", gender: "M" },
+                  { NPI: "1710056130", name: "6290 SW 114TH ST, MIAMI, FL 33156", gender: "M" },
+                  { NPI: "1699887893", name: "15625 SW 82ND CT, VILLAGE OF PALMETTO BAY, FL 33157", gender: "F" },
+                  { NPI: "1700981156", name: "1321 NW 14TH ST, MIAMI, FL 33125", gender: "M" }
+                ]
+              }
+            },
+            {
+              name: "Providers in Boston with a secondary language/other ID, showing name, address, and other ID",
+              description: "Returns providers in Boston with a secondary language or other ID, showing name, address, and other ID.",
+              input: { terms: "boston", q: "addr_practice.city:Boston AND other_ids.id:*", df: "name.full,addr_practice.full,other_ids[0].id", sf: "addr_practice.city,other_ids.id", count: 6 },
+              output: {
+                total: 5638,
+                providers: [
+                  { NPI: "1497028419", name: "185 PILGRIM RD, BOSTON, MA 02215", other_ids: "F336459-1" },
+                  { NPI: "1811991201", name: "300 LONGWOOD AVE FEGAN 3, BOSTON, MA 02115", other_ids: "286370099" },
+                  { NPI: "1972500429", name: "150 S HUNTINGTON AVE, BOSTON, MA 02130", other_ids: "32946-6" },
+                  { NPI: "1497752620", name: "75 FRANCIS ST, BOSTON, MA 02115", other_ids: "3011283" },
+                  { NPI: "1659379022", name: "654 BEACON ST 2ND FLOOR, BOSTON, MA 02215", other_ids: "AA 27096" },
+                  { NPI: "1992705834", name: "75 FRANCIS ST, BOSTON, MA 02115", other_ids: "PA101515" }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          name: "nlm_search_icd9_diagnoses",
+          description: `Search for ICD-9-CM diagnoses using the National Library of Medicine's (NLM) API. ICD-9-CM (International Classification of Diseases, Ninth Revision, Clinical Modification) is a medical coding system for classifying diagnoses and reasons for visits in U.S. health care settings.\n\nCurrently using: ICD-9-CM version 32.\nSource files are available from CMS.\n\n**All available fields:**\n- code: The ICD-9-CM diagnosis code, e.g., 0011, V092\n- code_dotted: The decimal version of the ICD-9-CM diagnosis code, e.g., 001.1, V09.2\n- short_name: The abbreviated name of the diagnosis\n- long_name: The full name of the diagnosis\n\nFor a full list of fields and advanced usage, see the [NLM ICD-9-CM API documentation](https://clinicaltables.nlm.nih.gov/apidoc/icd9cm_dx/v3/doc.html).`,
+          inputSchema: {
+            type: "object",
+            properties: {
+              terms: { type: "string", description: "The search string (e.g., part of a code or name) for which to find matches in the list. Multiple words are ANDed together." },
+              maxList: { type: "number", description: "Maximum number of results to return (default: 7, max: 500)." },
+              count: { type: "number", description: "Number of results per page (default: 7, max: 500). Use for pagination." },
+              offset: { type: "number", description: "Starting result number (default: 0). Use for pagination. Note: total limit is 7,500 (offset + count)." },
+              q: { type: "string", description: "Additional query constraints. See Elasticsearch query string syntax." },
+              df: { type: "string", description: "Comma-separated list of fields to display in results (default: code_dotted,long_name)." },
+              sf: { type: "string", description: "Comma-separated list of fields to search in (default: code,code_dotted,short_name,long_name)." },
+              cf: { type: "string", description: "Field to regard as the 'code' for the returned item data (default: code)." },
+              ef: { type: "string", description: "Comma-separated list of extra fields to include. Can use aliases with colon syntax: field_name:alias." }
+            },
+            required: ["terms"]
+          },
+          examples: [
+            {
+              name: "Search for codes starting with 08",
+              description: "Returns ICD-9-CM diagnosis codes and names where the code starts with '08'.",
+              input: { terms: "08" },
+              output: {
+                total: 51,
+                codes: [
+                  { code: "0820", code_dotted: "082.0", short_name: " Spotted fevers", long_name: "Spotted fevers" },
+                  { code: "08241", code_dotted: "082.41", short_name: " Ehrlichiosis chafeensis [E. chafeensis]", long_name: "Ehrlichiosis chafeensis [E. chafeensis]" }
+                ]
+              }
+            },
+            {
+              name: "Search for diagnoses containing 'brai' and return short names",
+              description: "Returns ICD-9-CM diagnosis codes and names where the names (or other searchable fields) contain words beginning with 'brai'.",
+              input: { terms: "brai", ef: "short_name" },
+              output: {
+                total: 120,
+                codes: [
+                  { code: "1917", code_dotted: "191.7", short_name: " Mal neo brain stem", long_name: "Malignant neoplasm of brain stem" },
+                  { code: "2375", code_dotted: "237.5", short_name: " Unc beh neo brain/spinal", long_name: "Neoplasm of uncertain behavior of brain and spinal cord" }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          name: "nlm_search_icd9_procedures",
+          description: `Search for ICD-9-CM procedures using the National Library of Medicine's (NLM) API. ICD-9-CM (International Classification of Diseases, Ninth Revision, Clinical Modification) is a medical coding system for classifying procedures and reasons for visits in U.S. health care settings.\n\nCurrently using: ICD-9-CM version 32.\nSource files are available from CMS.\n\n**All available fields:**\n- code: The ICD-9-CM procedure code, e.g., 210, 0780\n- code_dotted: The decimal version of the ICD-9-CM procedure code, e.g., 21.0, 07.80\n- short_name: The abbreviated name of the procedure\n- long_name: The full name of the procedure\n\nFor a full list of fields and advanced usage, see the [NLM ICD-9-CM Procedures API documentation](https://clinicaltables.nlm.nih.gov/apidoc/icd9cm_sg/v3/doc.html).`,
+          inputSchema: {
+            type: "object",
+            properties: {
+              terms: { type: "string", description: "The search string (e.g., part of a code or name) for which to find matches in the list. Multiple words are ANDed together." },
+              maxList: { type: "number", description: "Maximum number of results to return (default: 7, max: 500)." },
+              count: { type: "number", description: "Number of results per page (default: 7, max: 500). Use for pagination." },
+              offset: { type: "number", description: "Starting result number (default: 0). Use for pagination. Note: total limit is 7,500 (offset + count)." },
+              q: { type: "string", description: "Additional query constraints. See Elasticsearch query string syntax." },
+              df: { type: "string", description: "Comma-separated list of fields to display in results (default: code_dotted,long_name)." },
+              sf: { type: "string", description: "Comma-separated list of fields to search in (default: code,code_dotted,short_name,long_name)." },
+              cf: { type: "string", description: "Field to regard as the 'code' for the returned item data (default: code)." },
+              ef: { type: "string", description: "Comma-separated list of extra fields to include. Can use aliases with colon syntax: field_name:alias." }
+            },
+            required: ["terms"]
+          },
+          examples: [
+            {
+              name: "Search for procedures starting with 08",
+              description: "Returns ICD-9-CM procedure codes and names where the code starts with '08'.",
+              input: { terms: "08", count: 3 },
+              output: {
+                total: 49,
+                codes: [
+                  { code: "0801", code_dotted: "08.01", short_name: "", long_name: "Incision of lid margin" },
+                  { code: "0802", code_dotted: "08.02", short_name: "", long_name: "Severing of blepharorrhaphy" },
+                  { code: "0809", code_dotted: "08.09", short_name: "", long_name: "Other incision of eyelid" }
+                ]
+              }
+            },
+            {
+              name: "Search for procedures containing 'brai' and return short names",
+              description: "Returns ICD-9-CM procedure codes and names where the names (or other searchable fields) contain words beginning with 'brai'.",
+              input: { terms: "brai", ef: "short_name", count: 3 },
+              output: {
+                total: 20,
+                codes: [
+                  { code: "0019", code_dotted: "00.19", short_name: "BBBD via infusion", long_name: "Disruption of blood brain barrier via infusion [BBBD]" },
+                  { code: "0113", code_dotted: "01.13", short_name: "Closed brain biopsy", long_name: "Closed [percutaneous] [needle] biopsy of brain" },
+                  { code: "0114", code_dotted: "01.14", short_name: "Open brain biopsy", long_name: "Open biopsy of brain" }
+                ]
+              }
+            },
+            {
+              name: "Search for heart procedures with short names",
+              description: "Returns heart-related procedures with abbreviated names included.",
+              input: { terms: "heart", count: 5, ef: "short_name" },
+              output: {
+                total: 61,
+                codes: [
+                  { code: "37.51", code_dotted: "37.51", short_name: "Heart transplantation", long_name: "Heart transplantation" },
+                  { code: "35.95", code_dotted: "35.95", short_name: "Heart repair revision", long_name: "Revision of corrective procedure on heart" },
+                  { code: "36.39", code_dotted: "36.39", short_name: "Oth heart revascular", long_name: "Other heart revascularization" },
+                  { code: "37.32", code_dotted: "37.32", short_name: "Heart aneurysm excision", long_name: "Excision of aneurysm of heart" },
+                  { code: "37.92", code_dotted: "37.92", short_name: "Injection into heart", long_name: "Injection of therapeutic substance into heart" }
+                ]
+              }
+            },
+            {
+              name: "Search for fracture procedures with code filtering",
+              description: "Returns fracture-related procedures in the 79.x code range using query filter.",
+              input: { terms: "fracture", q: "code:79*", count: 4 },
+              output: {
+                total: 50,
+                codes: [
+                  { code: "79.60", code_dotted: "79.60", short_name: "", long_name: "Open fx site debride NOS" },
+                  { code: "79.61", code_dotted: "79.61", short_name: "", long_name: "Debrid open fx-humerus" },
+                  { code: "79.65", code_dotted: "79.65", short_name: "", long_name: "Debrid opn fx-femur" },
+                  { code: "79.01", code_dotted: "79.01", short_name: "", long_name: "Closed fx reduct humerus" }
+                ]
+              }
+            },
+            {
+              name: "Search for joint replacement procedures with pagination",
+              description: "Returns joint replacement procedures using pagination to get the first results.",
+              input: { terms: "replacement", count: 5, offset: 0, ef: "short_name" },
+              output: {
+                total: 149,
+                codes: [
+                  { code: "81.51", code_dotted: "81.51", short_name: "Total hip replacement", long_name: "Total hip replacement" },
+                  { code: "81.52", code_dotted: "81.52", short_name: "Partial hip replacement", long_name: "Partial hip replacement" },
+                  { code: "81.54", code_dotted: "81.54", short_name: "Total knee replacement", long_name: "Total knee replacement" },
+                  { code: "81.56", code_dotted: "81.56", short_name: "Total ankle replacement", long_name: "Total ankle replacement" },
+                  { code: "81.73", code_dotted: "81.73", short_name: "Total wrist replacement", long_name: "Total wrist replacement" }
+                ]
+              }
+            },
+            {
+              name: "Search for endoscopic GI procedures with complex filtering",
+              description: "Returns endoscopic procedures in gastroenterology using complex code filtering.",
+              input: { terms: "endoscopic", q: "code:45* OR code:44*", count: 3, ef: "short_name" },
+              output: {
+                total: 9,
+                codes: [
+                  { code: "44.32", code_dotted: "44.32", short_name: "Percu gastrojejunostomy", long_name: "Percu gastrojejunostomy" },
+                  { code: "44.22", code_dotted: "44.22", short_name: "Endoscop dilate pylorus", long_name: "Endoscop dilate pylorus" },
+                  { code: "44.14", code_dotted: "44.14", short_name: "Closed gastric biopsy", long_name: "Closed gastric biopsy" }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }));
+
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const toolName = request.params?.name;
+      const args = request.params?.arguments;
+      try {
+        switch (toolName) {
+          case 'nlm_search_icd10': {
+            let terms: string | undefined;
+            if (typeof args === 'object' && args !== null && 'terms' in args) {
+              terms = String((args as any).terms);
+            } else if (typeof args === 'string') {
+              terms = args as string;
+            }
+            if (!terms) throw new McpError(-32602, 'terms is required');
+            const result = await searchICD10CM(
+              terms,
+              (args as any)?.maxList,
+              (args as any)?.count,
+              (args as any)?.offset,
+              (args as any)?.q,
+              (args as any)?.df,
+              (args as any)?.sf,
+              (args as any)?.cf,
+              (args as any)?.ef
+            );
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+          }
+          case 'nlm_search_npi_org': {
+            let terms: string | undefined;
+            if (typeof args === 'object' && args !== null && 'terms' in args) {
+              terms = String((args as any).terms);
+            } else if (typeof args === 'string') {
+              terms = args as string;
+            }
+            if (!terms) throw new McpError(-32602, 'terms is required');
+            const result = await searchNPI(
+              terms,
+              (args as any)?.maxList,
+              (args as any)?.count,
+              (args as any)?.offset,
+              (args as any)?.q,
+              (args as any)?.df,
+              (args as any)?.sf,
+              (args as any)?.cf,
+              (args as any)?.ef
+            );
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+          }
+          case 'cms_search_providers': {
+            const result = await searchMedicare(
+              (args as any)?.dataset_type,
+              (args as any)?.year,
+              (args as any)?.hcpcs_code,
+              (args as any)?.geo_level,
+              (args as any)?.geo_code,
+              (args as any)?.place_of_service,
+              (args as any)?.size,
+              (args as any)?.offset,
+              (args as any)?.text_search,
+              (args as any)?.sort,
+              (args as any)?.provider_type
+            );
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+          }
+          case 'nlm_search_hcpcs': {
+            const result = await searchHCPCS(
+              (args as any)?.terms,
+              (args as any)?.maxList,
+              (args as any)?.count,
+              (args as any)?.offset,
+              (args as any)?.q,
+              (args as any)?.df,
+              (args as any)?.sf,
+              (args as any)?.cf,
+              (args as any)?.ef
+            );
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+          }
+          case 'nlm_search_npi_ind': {
+            let terms: string | undefined;
+            if (typeof args === 'object' && args !== null && 'terms' in args) {
+              terms = String((args as any).terms);
+            } else if (typeof args === 'string') {
+              terms = args as string;
+            }
+            if (!terms) throw new McpError(-32602, 'terms is required');
+            const result = await searchNPIIndividual(
+              terms,
+              (args as any)?.maxList,
+              (args as any)?.count,
+              (args as any)?.offset,
+              (args as any)?.q,
+              (args as any)?.df,
+              (args as any)?.sf,
+              (args as any)?.cf,
+              (args as any)?.ef
+            );
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+          }
+          case 'nlm_search_icd9_diagnoses': {
+            let terms: string | undefined;
+            if (typeof args === 'object' && args !== null && 'terms' in args) {
+              terms = String((args as any).terms);
+            } else if (typeof args === 'string') {
+              terms = args as string;
+            }
+            if (!terms) throw new McpError(-32602, 'terms is required');
+            const result = await searchICD9CM(
+              terms,
+              (args as any)?.maxList,
+              (args as any)?.count,
+              (args as any)?.offset,
+              (args as any)?.q,
+              (args as any)?.df,
+              (args as any)?.sf,
+              (args as any)?.cf,
+              (args as any)?.ef
+            );
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+          }
+          case 'nlm_search_icd9_procedures': {
+            let terms: string | undefined;
+            if (typeof args === 'object' && args !== null && 'terms' in args) {
+              terms = String((args as any).terms);
+            } else if (typeof args === 'string') {
+              terms = args as string;
+            }
+            if (!terms) throw new McpError(-32602, 'terms is required');
+            const result = await searchICD9Procedures(
+              terms,
+              (args as any)?.maxList,
+              (args as any)?.count,
+              (args as any)?.offset,
+              (args as any)?.q,
+              (args as any)?.df,
+              (args as any)?.sf,
+              (args as any)?.cf,
+              (args as any)?.ef
+            );
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+          }
+          default:
+            throw new McpError(-32603, 'Unknown tool');
+        }
+      } catch (error) {
+        throw new McpError(-32603, error instanceof Error ? error.message : String(error));
+      }
+    });
+
+    await server.connect(transport);
+  } else {
+    const server = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      const method = req.method || '';
+      const url = req.url || '';
+
+      // Health check endpoint
+      if (method === 'GET' && url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+        return;
+      }
+
+      // List tools endpoint
+      if (method === 'POST' && url === '/list_tools') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          tools: [
+            {
+              name: 'nlm_search_icd10',
+              description: SEARCH_ICD10CM_TOOL.description,
+              input_schema: SEARCH_ICD10CM_TOOL.input_schema,
+              responseSchema: SEARCH_ICD10CM_TOOL.responseSchema
+            },
+            {
+              name: 'nlm_search_npi_org',
+              description: SEARCH_NPI_TOOL.description,
+              input_schema: SEARCH_NPI_TOOL.input_schema,
+              responseSchema: SEARCH_NPI_TOOL.responseSchema
+            },
+            {
+              name: 'nlm_search_npi_ind',
+              description: SEARCH_NPI_INDIVIDUAL_TOOL.description,
+              input_schema: SEARCH_NPI_INDIVIDUAL_TOOL.input_schema,
+              responseSchema: SEARCH_NPI_INDIVIDUAL_TOOL.responseSchema
+            },
+            {
+              name: 'cms_search_providers',
+              description: SEARCH_MEDICARE_TOOL.description,
+              input_schema: SEARCH_MEDICARE_TOOL.input_schema,
+              responseSchema: SEARCH_MEDICARE_TOOL.responseSchema
+            },
+            {
+              name: 'nlm_search_hcpcs',
+              description: SEARCH_HCPCS_TOOL.description,
+              input_schema: SEARCH_HCPCS_TOOL.input_schema,
+              responseSchema: SEARCH_HCPCS_TOOL.responseSchema
+            },
+            {
+              name: 'nlm_search_icd9_diagnoses',
+              description: SEARCH_ICD9CM_TOOL.description,
+              input_schema: SEARCH_ICD9CM_TOOL.input_schema,
+              responseSchema: SEARCH_ICD9CM_TOOL.responseSchema
+            },
+            {
+              name: 'nlm_search_icd9_procedures',
+              description: SEARCH_ICD9_PROCEDURES_TOOL.description,
+              input_schema: SEARCH_ICD9_PROCEDURES_TOOL.input_schema,
+              responseSchema: SEARCH_ICD9_PROCEDURES_TOOL.responseSchema
+            }
+          ]
+        }));
+        return;
+      }
+
+      // Helper to parse JSON body
+      const parseBody = (req: http.IncomingMessage) => new Promise<any>((resolve, reject) => {
+        let body = '';
+        req.on('data', (chunk: any) => { body += chunk; });
+        req.on('end', () => {
+          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+        });
+      });
+
+      // Routing for all tools
+      if (method === 'POST') {
+        let data: any;
+        let result: any;
+        try {
+          data = await parseBody(req);
+          const url = req.url || '';
+          if (url === '/nlm_search_icd10') {
+            result = await searchICD10CM(data.terms, data.maxList, data.count, data.offset, data.q, data.df, data.sf, data.cf, data.ef);
+          } else if (url === '/nlm_search_npi_org') {
+            result = await searchNPI(data.terms, data.maxList, data.count, data.offset, data.q, data.df, data.sf, data.cf, data.ef);
+          } else if (url === '/nlm_search_npi_ind') {
+            result = await searchNPIIndividual(data.terms, data.maxList, data.count, data.offset, data.q, data.df, data.sf, data.cf, data.ef);
+          } else if (url === '/cms_search_providers') {
+            result = await searchMedicare(data.dataset_type, data.year, data.hcpcs_code, data.geo_level, data.geo_code, data.place_of_service, data.size, data.offset, data.text_search, data.sort, data.provider_type);
+          } else if (url === '/nlm_search_hcpcs') {
+            result = await searchHCPCS(data.terms, data.maxList, data.count, data.offset, data.q, data.df, data.sf, data.cf, data.ef);
+          } else if (url === '/nlm_search_icd9_diagnoses') {
+            result = await searchICD9CM(data.terms, data.maxList, data.count, data.offset, data.q, data.df, data.sf, data.cf, data.ef);
+          } else if (url === '/nlm_search_icd9_procedures') {
+            result = await searchICD9Procedures(data.terms, data.maxList, data.count, data.offset, data.q, data.df, data.sf, data.cf, data.ef);
+          } else {
+            sendError(res, 'Not found', 404);
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          sendError(res, err instanceof Error ? err.message : String(err));
+        }
+      } else {
+        sendError(res, 'Not found', 404);
+      }
+    });
+    server.listen(PORT, () => {
+      // Server is running
+    });
+  }
+}
+
+// Handle errors silently using logger
+runServer().catch((error) => {
+  logger.error('Server error:', { error: error instanceof Error ? error.message : String(error) });
+  process.exit(1);
+});
+
+export const SEARCH_ICD9CM_TOOL: Tool = {
+  name: "nlm_search_icd9_diagnoses",
+  description: `Search for individual healthcare providers using the National Library of Medicine's (NLM) National Provider Identifier (NPI) database for individuals. This API uses NPI data from CMS, Health Care Provider Taxonomy from NUCC, and Crosswalk Medicare Provider/Supplier to Healthcare Provider Taxonomy from CMS.\n\n**All available fields:**\n- NPI\n- provider_type\n- gender\n- name.full, name.last, name.first, name.middle, name.credential, name.prefix, name.suffix\n- addr_practice.full, addr_practice.line1, addr_practice.line2, addr_practice.city, addr_practice.state, addr_practice.zip, addr_practice.phone, addr_practice.fax, addr_practice.country\n- addr_mailing.full, addr_mailing.line1, addr_mailing.line2, addr_mailing.city, addr_mailing.state, addr_mailing.zip, addr_mailing.phone, addr_mailing.fax, addr_mailing.country\n- name_other.full, name_other.last, name_other.first, name_other.middle, name_other.credential, name_other.prefix, name_other.suffix\n- licenses.taxonomy.code, licenses.taxonomy.grouping, licenses.taxonomy.classification, licenses.taxonomy.specialization\n- licenses.medicare.spc_code, licenses.medicare.type\n- other_ids.id, other_ids.type, other_ids.issuer, other_ids.state\n- misc.auth_official.last, misc.auth_official.first, misc.auth_official.middle, misc.auth_official.credential, misc.auth_official.title, misc.auth_official.prefix, misc.auth_official.suffix, misc.auth_official.phone\n- misc.replacement_NPI, misc.EIN, misc.enumeration_date, misc.last_update_date, misc.is_sole_proprietor, misc.is_org_subpart, misc.parent_LBN, misc.parent_TIN\n\nFor a full list of fields and advanced usage, see the [NLM NPI Individual API documentation](https://clinicaltables.nlm.nih.gov/apidoc/npi_idv/v3/doc.html).`,
+  input_schema: {
+    type: "object",
+    properties: {
+      terms: {
+        type: "string",
+        description: "Search terms (name, NPI, or other identifiers). Multiple words are ANDed together."
+      },
+      maxList: {
+        type: "number",
+        description: "Maximum number of results to return (default: 7, max: 500)."
+      },
+      count: {
+        type: "number",
+        description: "Number of results per page (default: 7, max: 500). Use for pagination."
+      },
+      offset: {
+        type: "number",
+        description: "Starting result number (default: 0). Use for pagination. Note: total limit is 7,500 (offset + count)."
+      },
+      q: {
+        type: "string",
+        description: "Additional query constraints. Examples:\n" +
+          "- `addr_practice.city:Bethesda`\n" +
+          "- `provider_type:Physician`\n" +
+          "- `gender:M`\n" +
+          "- `addr_practice.state:NY AND provider_type:Physician`"
+      },
+      df: {
+        type: "string",
+        description: "Comma-separated list of fields to display in results (default: NPI,name.full,provider_type,addr_practice.full)."
+      },
+      sf: {
+        type: "string",
+        description: "Comma-separated list of fields to search in (default: NPI,name.full,provider_type,addr_practice.full)."
+      },
+      cf: {
+        type: "string",
+        description: "Field to regard as the 'code' for the returned item data (default: NPI)."
+      },
+      ef: {
+        type: "string",
+        description: "Comma-separated list of extra fields to include. Can use aliases with colon syntax: field_name:alias."
+      }
+    },
+    required: ["terms"]
+  },
+  responseSchema: {
+    type: 'object',
+    properties: {
+      total: { type: 'number', description: 'Total number of results available' },
+      providers: { 
+        type: 'array',
+        description: 'List of individual healthcare providers matching the search criteria',
+        items: {
+          type: 'object',
+          properties: {
+            NPI: { type: 'string', description: 'National Provider Identifier' },
+            name: { type: 'string', description: 'Provider name' },
+            provider_type: { type: 'string', description: 'Type of provider' },
+            gender: { type: 'string', description: 'Provider gender' },
+            address: { type: 'string', description: 'Provider address' }
+            // extra fields will be added dynamically
+          }
+        }
+      }
+    }
+  },
+  examples: [
+    {
+      name: "Search for individual providers named 'smith' (limit 2)",
+      description: "Returns the first 2 individual providers named 'smith'.",
+      input: { terms: "smith", count: 2 },
+      output: {
+        total: 10000,
+        providers: [
+          { NPI: "1871139162", name: "DONTHI, ANKITH", provider_type: "Nurse Practitioner", address: "111 OTIS SMITH DR OTIS SMITH, CLARKSVILLE, TN 37043" },
+          { NPI: "1508500414", name: "ABIOYE, ABIODUN", provider_type: "Physician/Internal Medicine", address: "7301 ROGERS AVE MERCY FORT SMITH, FORT SMITH, AR 72903" }
+        ]
+      }
+    },
+    {
+      name: "Search for female physicians (limit 2)",
+      description: "Returns the first 2 female physicians named 'smith' using the q parameter.",
+      input: { terms: "smith", q: "gender:F AND provider_type:Physician", count: 2 },
+      output: {
+        total: 4086,
+        providers: [
+          { NPI: "1861724221", name: "CRANE, NICOLE", provider_type: "Physician Assistant", address: "303 SMITH ST, LAGRANGE, GA 30240" },
+          { NPI: "1316918568", name: "VERNAY, KATHRYN", provider_type: "Physician Assistant", address: "1351 SMITH ST, FABIUS, NY 13063" }
+        ]
+      }
+    },
+    {
+      name: "Providers in Boston with a secondary language/other ID",
+      description: "Returns providers in Boston with a secondary language or other ID, showing name, address, and other ID.",
+      input: { terms: "boston", q: "addr_practice.city:Boston AND other_ids.id:*", df: "name.full,addr_practice.full,other_ids[0].id", sf: "addr_practice.city,other_ids.id", count: 2 },
+      output: {
+        total: 5638,
+        providers: [
+          { NPI: "1497028419", name: "185 PILGRIM RD, BOSTON, MA 02215", provider_type: "F336459-1", address: "" },
+          { NPI: "1811991201", name: "300 LONGWOOD AVE FEGAN 3, BOSTON, MA 02115", provider_type: "286370099", address: "" }
+        ]
+      }
+    },
+    {
+      name: "Search for individual providers named John in Bethesda",
+      description: "Returns individual providers named 'john' in 'bethesda' area.",
+      input: { terms: "john bethesda", maxList: 3 },
+      output: {
+        total: 127,
+        providers: [
+          { NPI: "1760880173", name: "JOHN KELLY", provider_type: "Dentist", gender: "M", address: "4833 BETHESDA AVE STE 302, BETHESDA, MD 20814, US" },
+          { NPI: "1033132295", name: "JOHN STURGEON", provider_type: "Physician/Diagnostic Radiology", gender: "M", address: "6204 DUNROBBIN DR, BETHESDA, MD 20816, US" },
+          { NPI: "1427180405", name: "JOHN GERSHEFSKI", provider_type: "Psychologist, Clinical", gender: "M", address: "6809 WHITTIER BLVD, BETHESDA, MD 20817, US" }
+        ]
+      }
+    },
+    {
+      name: "Search for female physicians",
+      description: "Returns female physicians using the q parameter.",
+      input: { terms: "smith", q: "gender:F AND provider_type:Physician", count: 2 },
+      output: {
+        total: 4539,
+        providers: [
+          { NPI: "1093892143", name: "JANE SMITH", provider_type: "Physician/Internal Medicine", gender: "F", address: "2308 N LINCOLN AVE, CHICAGO, IL 60614" },
+          { NPI: "1275692253", name: "MARY SMITH", provider_type: "Physician/Family Practice", gender: "F", address: "1804 W PLAZA DR, WINCHESTER, VA 22601" }
+        ]
+      }
+    },
+    {
+      name: "Search with custom display fields",
+      description: "Returns individual providers with custom display fields including gender.",
+      input: { terms: "williams", df: "NPI,name.full,provider_type,gender,addr_practice.city", count: 2 },
+      output: {
+        total: 26306,
+        providers: [
+          { NPI: "1225588858", name: "RYAN MATTHEW ANLIKER I", provider_type: "Specialist", gender: "M", address: "WILLIAMS" },
+          { NPI: "1023354495", name: "MARY WILLIAMS WILLIAMS", provider_type: "Social Worker", gender: "F", address: "AUGUSTA" }
+        ]
+      }
+    },
+    {
+      name: "Search with extra fields for other IDs",
+      description: "Returns individual providers with additional other_ids information.",
+      input: { terms: "williams", ef: "other_ids", count: 2 },
+      output: {
+        total: 26306,
+        providers: [
+          { NPI: "1225588858", name: "RYAN MATTHEW ANLIKER I", provider_type: "Specialist", gender: "M", address: "18151 WILLIAMS HWY, WILLIAMS, OR 97544, US", other_ids: [{"state":"PA","type":"05","id":"282NW0100X"}] },
+          { NPI: "1023354495", name: "MARY WILLIAMS WILLIAMS", provider_type: "Social Worker", gender: "F", address: "1 FREEDOM WAY, AUGUSTA, GA 30904, US", other_ids: [{"type":"02","id":"G91672"}] }
+        ]
+      }
+    },
+    {
+      name: "Paginate individual providers",
+      description: "Returns individual providers with pagination using offset and count.",
+      input: { terms: "john", offset: 2, count: 2 },
+      output: {
+        total: 10000,
+        providers: [
+          { NPI: "1447647847", name: "JOHN DELANEY", provider_type: "Student in an Organized Health Care Education/Training Program", gender: "M", address: "8901 WISCONSIN AVE, BETHESDA, MD 20889, US" },
+          { NPI: "1710044342", name: "JOHN ZINNER", provider_type: "Physician/Psychiatry", gender: "M", address: "7111 LAVEROCK LN, BETHESDA, MD 20817, US" }
+        ]
+      }
+    },
+    {
+      name: "Providers in Miami with credential 'DO', showing name, mailing address, and gender",
+      description: "Returns providers in Miami with the credential 'DO', including their full name, mailing address, and gender.",
+      input: { terms: "miami", q: "name.credential:DO AND addr_practice.city:Miami", df: "name.full,addr_mailing.full,gender", sf: "name.credential,addr_practice.city", count: 7 },
+      output: {
+        total: 834,
+        providers: [
+          { NPI: "1275754459", name: "375 NE 54TH ST SUITE #2, MIAMI, FL 33137", gender: "M" },
+          { NPI: "1780955906", name: "3100 SW 62ND AVE, MIAMI, FL 33155", gender: "M" },
+          { NPI: "1245671569", name: "450 FOURTH AVE, PELHAM, NY 10803", gender: "M" },
+          { NPI: "1679905707", name: "13707 SW 152ND STREET, MIAMI, FL 33177", gender: "M" },
+          { NPI: "1710056130", name: "6290 SW 114TH ST, MIAMI, FL 33156", gender: "M" },
+          { NPI: "1699887893", name: "15625 SW 82ND CT, VILLAGE OF PALMETTO BAY, FL 33157", gender: "F" },
+          { NPI: "1700981156", name: "1321 NW 14TH ST, MIAMI, FL 33125", gender: "M" }
+        ]
+      }
+    },
+    {
+      name: "Providers in Boston with a secondary language/other ID, showing name, address, and other ID",
+      description: "Returns providers in Boston with a secondary language or other ID, showing name, address, and other ID.",
+      input: { terms: "boston", q: "addr_practice.city:Boston AND other_ids.id:*", df: "name.full,addr_practice.full,other_ids[0].id", sf: "addr_practice.city,other_ids.id", count: 6 },
+      output: {
+        total: 5638,
+        providers: [
+          { NPI: "1497028419", name: "185 PILGRIM RD, BOSTON, MA 02215", other_ids: "F336459-1" },
+          { NPI: "1811991201", name: "300 LONGWOOD AVE FEGAN 3, BOSTON, MA 02115", other_ids: "286370099" },
+          { NPI: "1972500429", name: "150 S HUNTINGTON AVE, BOSTON, MA 02130", other_ids: "32946-6" },
+          { NPI: "1497752620", name: "75 FRANCIS ST, BOSTON, MA 02115", other_ids: "3011283" },
+          { NPI: "1659379022", name: "654 BEACON ST 2ND FLOOR, BOSTON, MA 02215", other_ids: "AA 27096" },
+          { NPI: "1992705834", name: "75 FRANCIS ST, BOSTON, MA 02115", other_ids: "PA101515" }
+        ]
+      }
+    }
+  ]
+};
+
+async function searchNPIIndividual(
+  terms: string,
+  maxList: number = 7,
+  count: number = 7,
+  offset: number = 0,
+  q?: string,
+  df: string = "NPI,name.full,provider_type,addr_practice.full",
+  sf: string = "NPI,name.full,provider_type,addr_practice.full",
+  cf: string = "NPI",
+  ef?: string
+) {
+  const params = new URLSearchParams({
+    terms,
+    maxList: maxList.toString(),
+    count: count.toString(),
+    offset: offset.toString(),
+    df,
+    sf,
+    cf
+  });
+
+  if (q) params.append('q', q);
+  if (ef) params.append('ef', ef);
+
+  const url = `https://clinicaltables.nlm.nih.gov/api/npi_idv/v3/search?${params.toString()}`;
+  
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const data = await response.json() as [number, string[], any, any[][], any];
+    
+    // Parse the response format: [total, codes, extra_fields, display_data, code_system]
+    const [total, codes, extraFields, displayData] = data;
+    
+    // Transform the data to match our expected format
+    const providers = codes.map((code: string, index: number) => {
+      const display = displayData[index];
+      const provider: any = {
+        NPI: code,
+        name: display[1] || '',
+        provider_type: display[2] || '',
+        address: display[3] || ''
+      };
+      
+      // Add gender if available in display data
+      if (display[4]) {
+        provider.gender = display[4];
+      }
+      
+      // Add extra fields if requested
+      if (extraFields && ef) {
+        const extraFieldNames = ef.split(',').map(f => f.split(':')[0].trim());
+        extraFieldNames.forEach(fieldName => {
+          if (extraFields[fieldName] && extraFields[fieldName][index]) {
+            provider[fieldName] = extraFields[fieldName][index];
+          }
+        });
+      }
+      
+      return provider;
+    });
+    
+    return {
+      total,
+      providers
+    };
+  } catch (error) {
+    logger.error('Error searching NPI individuals:', { error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+}
+
+export const SEARCH_ICD9CM_TOOL: Tool = {
+  name: "nlm_search_icd9_diagnoses",
+  description: `Search for ICD-9-CM diagnoses using the National Library of Medicine's (NLM) API. ICD-9-CM (International Classification of Diseases, Ninth Revision, Clinical Modification) is a medical coding system for classifying diagnoses and reasons for visits in U.S. health care settings.\n\nCurrently using: ICD-9-CM version 32.\nSource files are available from CMS.\n\n**All available fields:**\n- code: The ICD-9-CM diagnosis code, e.g., 0011, V092\n- code_dotted: The decimal version of the ICD-9-CM diagnosis code, e.g., 001.1, V09.2\n- short_name: The abbreviated name of the diagnosis\n- long_name: The full name of the diagnosis\n\nFor a full list of fields and advanced usage, see the [NLM ICD-9-CM API documentation](https://clinicaltables.nlm.nih.gov/apidoc/icd9cm_dx/v3/doc.html).`,
+  input_schema: {
+    type: "object",
+    properties: {
+      terms: {
+        type: "string",
+        description: "The search string (e.g., part of a code or name) for which to find matches in the list. Multiple words are ANDed together."
+      },
+      maxList: {
+        type: "number",
+        description: "Maximum number of results to return (default: 7, max: 500)."
+      },
+      count: {
+        type: "number",
+        description: "Number of results per page (default: 7, max: 500). Use for pagination."
+      },
+      offset: {
+        type: "number",
+        description: "Starting result number (default: 0). Use for pagination. Note: total limit is 7,500 (offset + count)."
+      },
+      q: {
+        type: "string",
+        description: "Additional query constraints. See Elasticsearch query string syntax."
+      },
+      df: {
+        type: "string",
+        description: "Comma-separated list of fields to display in results (default: code_dotted,long_name)."
+      },
+      sf: {
+        type: "string",
+        description: "Comma-separated list of fields to search in (default: code,code_dotted,short_name,long_name)."
+      },
+      cf: {
+        type: "string",
+        description: "Field to regard as the 'code' for the returned item data (default: code)."
+      },
+      ef: {
+        type: "string",
+        description: "Comma-separated list of extra fields to include. Can use aliases with colon syntax: field_name:alias."
+      }
+    },
+    required: ["terms"]
+  },
+  responseSchema: {
+    type: 'object',
+    properties: {
+      total: { type: 'number', description: 'Total number of results available' },
+      codes: {
+        type: 'array',
+        description: 'List of ICD-9-CM codes matching the search criteria',
+        items: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', description: 'ICD-9-CM code' },
+            code_dotted: { type: 'string', description: 'Decimal version of the code' },
+            short_name: { type: 'string', description: 'Abbreviated name' },
+            long_name: { type: 'string', description: 'Full name' }
+          }
+        }
+      }
+    }
+  },
+  examples: [
+    {
+      name: "Search for codes starting with 08",
+      description: "Returns ICD-9-CM diagnosis codes and names where the code starts with '08'.",
+      input: { terms: "08" },
+      output: {
+        total: 51,
+        codes: [
+          { code: "0820", code_dotted: "082.0", short_name: " Spotted fevers", long_name: "Spotted fevers" },
+          { code: "08241", code_dotted: "082.41", short_name: " Ehrlichiosis chafeensis [E. chafeensis]", long_name: "Ehrlichiosis chafeensis [E. chafeensis]" }
+        ]
+      }
+    },
+    {
+      name: "Search for diagnoses containing 'brai' and return short names",
+      description: "Returns ICD-9-CM diagnosis codes and names where the names (or other searchable fields) contain words beginning with 'brai'.",
+      input: { terms: "brai", ef: "short_name" },
+      output: {
+        total: 120,
+        codes: [
+          { code: "1917", code_dotted: "191.7", short_name: " Mal neo brain stem", long_name: "Malignant neoplasm of brain stem" },
+          { code: "2375", code_dotted: "237.5", short_name: " Unc beh neo brain/spinal", long_name: "Neoplasm of uncertain behavior of brain and spinal cord" }
+        ]
+      }
+    },
+    {
+      name: "Search for diabetes codes",
+      description: "Returns ICD-9-CM diagnosis codes for 'diabetes' (top 3 results).",
+      input: { terms: "diabetes", count: 3 },
+      output: {
+        total: 72,
+        codes: [
+          { code: "253.5", code_dotted: "253.5", short_name: "", long_name: " Diabetes insipidus" },
+          { code: "648.01", code_dotted: "648.01", short_name: "", long_name: " Diabetes mellitus of mother, complicating pregnancy, childbirth, or the puerperium, delivered, with or without mention of antepartum condition" },
+          { code: "648.03", code_dotted: "648.03", short_name: "", long_name: " Diabetes mellitus of mother, complicating pregnancy, childbirth, or the puerperium, antepartum condition or complication" }
+        ]
+      }
+    },
+    {
+      name: "Search for codes starting with 08",
+      description: "Returns ICD-9-CM diagnosis codes and names where the code starts with '08'.",
+      input: { terms: "08", count: 2 },
+      output: {
+        total: 51,
+        codes: [
+          { code: "080", code_dotted: "080", short_name: "", long_name: " Louse-borne (epidemic) typhus" },
+          { code: "081.0", code_dotted: "081.0", short_name: "", long_name: " Murine (endemic) typhus" }
+        ]
+      }
+    },
+    {
+      name: "Search for diagnoses containing 'brai' and return short names",
+      description: "Returns ICD-9-CM diagnosis codes and names where the names (or other searchable fields) contain words beginning with 'brai'.",
+      input: { terms: "brai", ef: "short_name", count: 2 },
+      output: {
+        total: 120,
+        codes: [
+          { code: "006.5", code_dotted: "006.5", short_name: " Amebic brain abscess", long_name: " Amebic brain abscess" },
+          { code: "013.20", code_dotted: "013.20", short_name: " Tuberculoma brain-unspec", long_name: " Tuberculoma of brain, unspecified" }
+        ]
+      }
+    }
+  ]
+};
+
+async function searchICD9CM(
+  terms: string,
+  maxList: number = 7,
+  count: number = 7,
+  offset: number = 0,
+  q?: string,
+  df: string = "code_dotted,long_name",
+  sf: string = "code,code_dotted,short_name,long_name",
+  cf: string = "code",
+  ef?: string
+) {
+  const params = new URLSearchParams({
+    terms,
+    maxList: maxList.toString(),
+    count: count.toString(),
+    offset: offset.toString(),
+    df,
+    sf,
+    cf
+  });
+  if (q) params.append('q', q);
+  if (ef) params.append('ef', ef);
+  const url = `https://clinicaltables.nlm.nih.gov/api/icd9cm_dx/v3/search?${params.toString()}`;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data = await response.json() as [number, string[], any, any[][], any];
+    const [total, codes, extraFields, displayData] = data;
+    const results = codes.map((code: string, index: number) => {
+      const display = displayData[index];
+      const result: any = {
+        code: display[0] || '',
+        code_dotted: display[0] || '',
+        short_name: '',
+        long_name: display[1] || ''
+      };
+      if (extraFields && ef) {
+        const extraFieldNames = ef.split(',').map(f => f.split(':')[0].trim());
+        extraFieldNames.forEach(fieldName => {
+          if (extraFields[fieldName] && extraFields[fieldName][index]) {
+            result[fieldName] = extraFields[fieldName][index];
+          }
+        });
+      }
+      return result;
+    });
+    return {
+      total,
+      codes: results
+    };
+  } catch (error) {
+    logger.error('Error searching ICD-9-CM:', { error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+}
+
+async function searchICD9Procedures(
+  terms: string,
+  maxList: number = 7,
+  count: number = 7,
+  offset: number = 0,
+  q?: string,
+  df: string = "code_dotted,long_name",
+  sf: string = "code,code_dotted,short_name,long_name",
+  cf: string = "code",
+  ef?: string
+) {
+  const params = new URLSearchParams({
+    terms,
+    maxList: maxList.toString(),
+    count: count.toString(),
+    offset: offset.toString(),
+    df,
+    sf,
+    cf
+  });
+  if (q) params.append('q', q);
+  if (ef) params.append('ef', ef);
+  const url = `https://clinicaltables.nlm.nih.gov/api/icd9cm_sg/v3/search?${params.toString()}`;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data = await response.json() as [number, string[], any, any[][], any];
+    const [total, codes, extraFields, displayData] = data;
+    const results = codes.map((code: string, index: number) => {
+      const display = displayData[index];
+      const result: any = {
+        code: display[0] || '',
+        code_dotted: display[0] || '',
+        short_name: '',
+        long_name: display[1] || ''
+      };
+      if (extraFields && ef) {
+        const extraFieldNames = ef.split(',').map(f => f.split(':')[0].trim());
+        extraFieldNames.forEach(fieldName => {
+          if (extraFields[fieldName] && extraFields[fieldName][index]) {
+            result[fieldName] = extraFields[fieldName][index];
+          }
+        });
+      }
+      return result;
+    });
+    return {
+      total,
+      codes: results
+    };
+  } catch (error) {
+    logger.error('Error searching ICD-9-CM procedures:', { error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+}
+
+export const SEARCH_ICD9_PROCEDURES_TOOL: Tool = {
+  name: "nlm_search_icd9_procedures",
+  description: `Search for ICD-9-CM procedures using the National Library of Medicine's (NLM) API. ICD-9-CM (International Classification of Diseases, Ninth Revision, Clinical Modification) is a medical coding system for classifying procedures and reasons for visits in U.S. health care settings.\n\nCurrently using: ICD-9-CM version 32.\nSource files are available from CMS.\n\n**All available fields:**\n- code: The ICD-9-CM procedure code, e.g., 210, 0780\n- code_dotted: The decimal version of the ICD-9-CM procedure code, e.g., 21.0, 07.80\n- short_name: The abbreviated name of the procedure\n- long_name: The full name of the procedure\n\nFor a full list of fields and advanced usage, see the [NLM ICD-9-CM Procedures API documentation](https://clinicaltables.nlm.nih.gov/apidoc/icd9cm_sg/v3/doc.html).`,
+  input_schema: {
+    type: "object",
+    properties: {
+      terms: {
+        type: "string",
+        description: "The search string (e.g., part of a code or name) for which to find matches in the list. Multiple words are ANDed together."
+      },
+      maxList: {
+        type: "number",
+        description: "Maximum number of results to return (default: 7, max: 500)."
+      },
+      count: {
+        type: "number",
+        description: "Number of results per page (default: 7, max: 500). Use for pagination."
+      },
+      offset: {
+        type: "number",
+        description: "Starting result number (default: 0). Use for pagination. Note: total limit is 7,500 (offset + count)."
+      },
+      q: {
+        type: "string",
+        description: "Additional query constraints. See Elasticsearch query string syntax."
+      },
+      df: {
+        type: "string",
+        description: "Comma-separated list of fields to display in results (default: code_dotted,long_name)."
+      },
+      sf: {
+        type: "string",
+        description: "Comma-separated list of fields to search in (default: code,code_dotted,short_name,long_name)."
+      },
+      cf: {
+        type: "string",
+        description: "Field to regard as the 'code' for the returned item data (default: code)."
+      },
+      ef: {
+        type: "string",
+        description: "Comma-separated list of extra fields to include. Can use aliases with colon syntax: field_name:alias."
+      }
+    },
+    required: ["terms"]
+  },
+  responseSchema: {
+    type: 'object',
+    properties: {
+      total: { type: 'number', description: 'Total number of results available' },
+      codes: {
+        type: 'array',
+        description: 'List of ICD-9-CM procedure codes matching the search criteria',
+        items: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', description: 'ICD-9-CM procedure code' },
+            code_dotted: { type: 'string', description: 'Decimal version of the code' },
+            short_name: { type: 'string', description: 'Abbreviated name' },
+            long_name: { type: 'string', description: 'Full name' }
+          }
+        }
+      }
+    }
+  },
+  examples: [
+    {
+      name: "Search for procedures starting with 08",
+      description: "Returns ICD-9-CM procedure codes and names where the code starts with '08'.",
+      input: { terms: "08", count: 3 },
+      output: {
+        total: 49,
+        codes: [
+          { code: "0801", code_dotted: "08.01", short_name: "", long_name: "Incision of lid margin" },
+          { code: "0802", code_dotted: "08.02", short_name: "", long_name: "Severing of blepharorrhaphy" },
+          { code: "0809", code_dotted: "08.09", short_name: "", long_name: "Other incision of eyelid" }
+        ]
+      }
+    },
+    {
+      name: "Search for procedures containing 'brai' and return short names",
+      description: "Returns ICD-9-CM procedure codes and names where the names (or other searchable fields) contain words beginning with 'brai'.",
+      input: { terms: "brai", ef: "short_name", count: 3 },
+      output: {
+        total: 20,
+        codes: [
+          { code: "0019", code_dotted: "00.19", short_name: "BBBD via infusion", long_name: "Disruption of blood brain barrier via infusion [BBBD]" },
+          { code: "0113", code_dotted: "01.13", short_name: "Closed brain biopsy", long_name: "Closed [percutaneous] [needle] biopsy of brain" },
+          { code: "0114", code_dotted: "01.14", short_name: "Open brain biopsy", long_name: "Open biopsy of brain" }
+        ]
+      }
+    },
+    {
+      name: "Search for heart procedures with short names",
+      description: "Returns heart-related procedures with abbreviated names included.",
+      input: { terms: "heart", count: 5, ef: "short_name" },
+      output: {
+        total: 61,
+        codes: [
+          { code: "37.51", code_dotted: "37.51", short_name: "Heart transplantation", long_name: "Heart transplantation" },
+          { code: "35.95", code_dotted: "35.95", short_name: "Heart repair revision", long_name: "Revision of corrective procedure on heart" },
+          { code: "36.39", code_dotted: "36.39", short_name: "Oth heart revascular", long_name: "Other heart revascularization" },
+          { code: "37.32", code_dotted: "37.32", short_name: "Heart aneurysm excision", long_name: "Excision of aneurysm of heart" },
+          { code: "37.92", code_dotted: "37.92", short_name: "Injection into heart", long_name: "Injection of therapeutic substance into heart" }
+        ]
+      }
+    },
+    {
+      name: "Search for fracture procedures with code filtering",
+      description: "Returns fracture-related procedures in the 79.x code range using query filter.",
+      input: { terms: "fracture", q: "code:79*", count: 4 },
+      output: {
+        total: 50,
+        codes: [
+          { code: "79.60", code_dotted: "79.60", short_name: "", long_name: "Open fx site debride NOS" },
+          { code: "79.61", code_dotted: "79.61", short_name: "", long_name: "Debrid open fx-humerus" },
+          { code: "79.65", code_dotted: "79.65", short_name: "", long_name: "Debrid opn fx-femur" },
+          { code: "79.01", code_dotted: "79.01", short_name: "", long_name: "Closed fx reduct humerus" }
+        ]
+      }
+    },
+    {
+      name: "Search for joint replacement procedures with pagination",
+      description: "Returns joint replacement procedures using pagination to get the first results.",
+      input: { terms: "replacement", count: 5, offset: 0, ef: "short_name" },
+      output: {
+        total: 149,
+        codes: [
+          { code: "81.51", code_dotted: "81.51", short_name: "Total hip replacement", long_name: "Total hip replacement" },
+          { code: "81.52", code_dotted: "81.52", short_name: "Partial hip replacement", long_name: "Partial hip replacement" },
+          { code: "81.54", code_dotted: "81.54", short_name: "Total knee replacement", long_name: "Total knee replacement" },
+          { code: "81.56", code_dotted: "81.56", short_name: "Total ankle replacement", long_name: "Total ankle replacement" },
+          { code: "81.73", code_dotted: "81.73", short_name: "Total wrist replacement", long_name: "Total wrist replacement" }
+        ]
+      }
+    },
+    {
+      name: "Search for endoscopic GI procedures with complex filtering",
+      description: "Returns endoscopic procedures in gastroenterology using complex code filtering.",
+      input: { terms: "endoscopic", q: "code:45* OR code:44*", count: 3, ef: "short_name" },
+      output: {
+        total: 9,
+        codes: [
+          { code: "44.32", code_dotted: "44.32", short_name: "Percu gastrojejunostomy", long_name: "Percu gastrojejunostomy" },
+          { code: "44.22", code_dotted: "44.22", short_name: "Endoscop dilate pylorus", long_name: "Endoscop dilate pylorus" },
+          { code: "44.14", code_dotted: "44.14", short_name: "Closed gastric biopsy", long_name: "Closed gastric biopsy" }
+        ]
+      }
+    }
+  ]
+};
