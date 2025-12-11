@@ -163,6 +163,42 @@ export const MEDICARE_INFO_TOOL: Tool = {
       sort_order: {
         type: "string",
         description: "For search_providers: Sort order ('asc' or 'desc', default: 'desc')."
+      },
+      drug_name: {
+        type: "string",
+        description: "For search_prescribers: Drug name to search for - brand or generic (e.g., 'semaglutide', 'Ozempic', 'metformin'). Searches both brand and generic names."
+      },
+      prescriber_type: {
+        type: "string",
+        description: "For search_prescribers: Prescriber specialty (e.g., 'Endocrinology', 'Family Practice', 'Internal Medicine')."
+      },
+      prescriber_npi: {
+        type: "string",
+        description: "For search_prescribers: National Provider Identifier (NPI) of the prescriber."
+      },
+      state: {
+        type: "string",
+        description: "For search_prescribers, search_hospitals: State abbreviation (e.g., 'CA', 'TX', 'NY')."
+      },
+      hospital_name: {
+        type: "string",
+        description: "For search_hospitals: Hospital name (partial match supported)."
+      },
+      hospital_id: {
+        type: "string",
+        description: "For search_hospitals: CMS Certification Number (CCN) or provider ID."
+      },
+      drg_code: {
+        type: "string",
+        description: "For search_hospitals (inpatient): Diagnosis Related Group (DRG) code."
+      },
+      spending_drug_name: {
+        type: "string",
+        description: "For search_spending: Drug name for spending analysis (brand or generic)."
+      },
+      spending_type: {
+        type: "string",
+        description: "For search_spending: Type of spending data - 'part_d' (prescription drugs), 'part_b' (administered drugs). Default: 'part_d'."
       }
     },
     required: ["method"]
@@ -516,6 +552,191 @@ async function searchMedicare(
   };
 }
 
+async function searchPrescribers(
+  drug_name?: string,
+  prescriber_npi?: string,
+  prescriber_type?: string,
+  state?: string,
+  size: number = 10,
+  offset: number = 0,
+  sort?: { field: string; direction: 'asc' | 'desc' }
+): Promise<any> {
+  const datasetId = '9552739e-3d05-4c1b-8eff-ecabf391e2e5'; // Medicare Part D Prescribers - by Provider and Drug
+
+  const query = new URLSearchParams();
+  query.append('size', String(size));
+  query.append('offset', String(offset));
+
+  // Add filters
+  if (drug_name) {
+    // Search brand name (most queries use brand name)
+    query.append('filter[Brnd_Name]', drug_name);
+  }
+  if (prescriber_npi) {
+    query.append('filter[Prscrbr_NPI]', prescriber_npi);
+  }
+  if (prescriber_type) {
+    query.append('filter[Prscrbr_Type]', prescriber_type);
+  }
+  if (state) {
+    query.append('filter[Prscrbr_State_Abrvtn]', state);
+  }
+
+  // Add sorting
+  if (sort) {
+    query.append('sort', `${sort.direction === 'desc' ? '-' : ''}${sort.field}`);
+  }
+
+  const url = `https://data.cms.gov/data-api/v1/dataset/${datasetId}/data?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`CMS API error: ${response.statusText}`);
+  }
+
+  const data = await response.json() as any[];
+
+  return {
+    total: data.length,
+    prescribers: data.map((item: any) => ({
+      npi: item.Prscrbr_NPI,
+      prescriber_name: `${item.Prscrbr_Last_Org_Name}, ${item.Prscrbr_First_Name || ''}`,
+      prescriber_type: item.Prscrbr_Type,
+      city: item.Prscrbr_City,
+      state: item.Prscrbr_State_Abrvtn,
+      brand_name: item.Brnd_Name,
+      generic_name: item.Gnrc_Name,
+      total_claims: item.Tot_Clms,
+      total_30day_fills: item.Tot_30day_Fills,
+      total_drug_cost: item.Tot_Drug_Cst,
+      total_beneficiaries: item.Tot_Benes
+    }))
+  };
+}
+
+async function searchHospitals(
+  hospital_name?: string,
+  hospital_id?: string,
+  state?: string,
+  city?: string,
+  drg_code?: string,
+  size: number = 10,
+  offset: number = 0,
+  sort?: { field: string; direction: 'asc' | 'desc' }
+): Promise<any> {
+  const datasetId = 'ee6fb1a5-39b9-46b3-a980-a7284551a732'; // Medicare Inpatient Hospitals - by Provider
+
+  const query = new URLSearchParams();
+  query.append('size', String(size));
+  query.append('offset', String(offset));
+
+  // Add filters
+  if (hospital_name) {
+    query.append('filter[Rndrng_Prvdr_Org_Name]', hospital_name);
+  }
+  if (hospital_id) {
+    query.append('filter[Rndrng_Prvdr_CCN]', hospital_id);
+  }
+  if (state) {
+    query.append('filter[Rndrng_Prvdr_State_Abrvtn]', state);
+  }
+  if (city) {
+    query.append('filter[Rndrng_Prvdr_City]', city);
+  }
+  if (drg_code) {
+    query.append('filter[DRG_Cd]', drg_code);
+  }
+
+  // Add sorting
+  if (sort) {
+    query.append('sort', `${sort.direction === 'desc' ? '-' : ''}${sort.field}`);
+  }
+
+  const url = `https://data.cms.gov/data-api/v1/dataset/${datasetId}/data?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`CMS API error: ${response.statusText}`);
+  }
+
+  const data = await response.json() as any[];
+
+  return {
+    total: data.length,
+    hospitals: data.map((item: any) => ({
+      ccn: item.Rndrng_Prvdr_CCN,
+      hospital_name: item.Rndrng_Prvdr_Org_Name,
+      street_address: item.Rndrng_Prvdr_St,
+      city: item.Rndrng_Prvdr_City,
+      state: item.Rndrng_Prvdr_State_Abrvtn,
+      zip: item.Rndrng_Prvdr_Zip5,
+      drg_code: item.DRG_Cd,
+      drg_description: item.DRG_Desc,
+      total_discharges: item.Tot_Dschrgs,
+      average_covered_charges: item.Avg_Cvrd_Chrgs,
+      average_total_payments: item.Avg_Tot_Pymt_Amt,
+      average_medicare_payments: item.Avg_Mdcr_Pymt_Amt
+    }))
+  };
+}
+
+async function searchSpending(
+  spending_drug_name?: string,
+  spending_type: string = 'part_d',
+  year?: string,
+  size: number = 10,
+  offset: number = 0,
+  sort?: { field: string; direction: 'asc' | 'desc' }
+): Promise<any> {
+  const datasetMap: Record<string, string> = {
+    'part_d': '7e0b4365-fd63-4a29-8f5e-e0ac9f66a81b', // Medicare Part D Spending by Drug
+    'part_b': '76a714ad-3a2c-43ac-b76d-9dadf8f7d890'  // Medicare Part B Spending by Drug
+  };
+
+  const datasetId = datasetMap[spending_type] || datasetMap['part_d'];
+
+  const query = new URLSearchParams();
+  query.append('size', String(size));
+  query.append('offset', String(offset));
+
+  // Add filters
+  if (spending_drug_name) {
+    query.append('filter[Brnd_Name]', spending_drug_name);
+  }
+  if (year) {
+    query.append('filter[Year]', year);
+  }
+
+  // Add sorting
+  if (sort) {
+    query.append('sort', `${sort.direction === 'desc' ? '-' : ''}${sort.field}`);
+  }
+
+  const url = `https://data.cms.gov/data-api/v1/dataset/${datasetId}/data?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`CMS API error: ${response.statusText}`);
+  }
+
+  const data = await response.json() as any[];
+
+  return {
+    total: data.length,
+    spending_type: spending_type,
+    drugs: data.map((item: any) => ({
+      brand_name: item.Brnd_Name,
+      generic_name: item.Gnrc_Name,
+      year: item.Year,
+      total_spending: item.Tot_Spndng,
+      total_claims: item.Tot_Clms,
+      total_beneficiaries: item.Tot_Benes,
+      average_spending_per_claim: item.Avg_Spndng_Per_Clm,
+      average_spending_per_beneficiary: item.Avg_Spndng_Per_Bene
+    }))
+  };
+}
+
 
 function sendError(res: http.ServerResponse, message: string, code: number = 400) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
@@ -573,14 +794,44 @@ async function runServer() {
                 return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
               }
 
-              case 'search_prescribers':
-                throw new McpError(-32603, 'search_prescribers not yet implemented');
+              case 'search_prescribers': {
+                const result = await searchPrescribers(
+                  (args as any)?.drug_name,
+                  (args as any)?.prescriber_npi,
+                  (args as any)?.prescriber_type,
+                  (args as any)?.state,
+                  (args as any)?.size,
+                  (args as any)?.offset,
+                  (args as any)?.sort
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
 
-              case 'search_hospitals':
-                throw new McpError(-32603, 'search_hospitals not yet implemented');
+              case 'search_hospitals': {
+                const result = await searchHospitals(
+                  (args as any)?.hospital_name,
+                  (args as any)?.hospital_id,
+                  (args as any)?.state,
+                  (args as any)?.city,
+                  (args as any)?.drg_code,
+                  (args as any)?.size,
+                  (args as any)?.offset,
+                  (args as any)?.sort
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
 
-              case 'search_spending':
-                throw new McpError(-32603, 'search_spending not yet implemented');
+              case 'search_spending': {
+                const result = await searchSpending(
+                  (args as any)?.spending_drug_name,
+                  (args as any)?.spending_type,
+                  (args as any)?.year,
+                  (args as any)?.size,
+                  (args as any)?.offset,
+                  (args as any)?.sort
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
 
               default:
                 throw new McpError(-32602, `Unknown method: ${method}. Valid methods: search_providers, search_prescribers, search_hospitals, search_spending`);
@@ -647,14 +898,14 @@ async function runServer() {
                 result = await searchMedicare(data.dataset_type, data.year, data.hcpcs_code, data.geo_level, data.geo_code, data.place_of_service, data.size, data.offset, data.text_search, data.sort, data.provider_type);
                 break;
               case 'search_prescribers':
-                sendError(res, 'search_prescribers not yet implemented', 501);
-                return;
+                result = await searchPrescribers(data.drug_name, data.prescriber_npi, data.prescriber_type, data.state, data.size, data.offset, data.sort);
+                break;
               case 'search_hospitals':
-                sendError(res, 'search_hospitals not yet implemented', 501);
-                return;
+                result = await searchHospitals(data.hospital_name, data.hospital_id, data.state, data.city, data.drg_code, data.size, data.offset, data.sort);
+                break;
               case 'search_spending':
-                sendError(res, 'search_spending not yet implemented', 501);
-                return;
+                result = await searchSpending(data.spending_drug_name, data.spending_type, data.year, data.size, data.offset, data.sort);
+                break;
               default:
                 sendError(res, `Unknown method: ${methodName}`, 400);
                 return;
