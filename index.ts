@@ -5,6 +5,13 @@ import 'dotenv/config';
 import http from 'http';
 import { URLSearchParams } from "url";
 import { Tool } from "./types";
+import * as fs from 'fs';
+import * as path from 'path';
+import * as readline from 'readline';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /**
  * Logging utility for consistent log format across the application
@@ -199,6 +206,38 @@ export const MEDICARE_INFO_TOOL: Tool = {
       spending_type: {
         type: "string",
         description: "For search_spending: Type of spending data - 'part_d' (prescription drugs), 'part_b' (administered drugs). Default: 'part_d'."
+      },
+      formulary_drug_name: {
+        type: "string",
+        description: "For search_formulary: Drug name to search for (partial match supported, e.g., 'metformin', 'insulin'). At least one of formulary_drug_name or ndc_code is required."
+      },
+      ndc_code: {
+        type: "string",
+        description: "For search_formulary: NDC (National Drug Code) for exact drug identification (e.g., '00002143380'). At least one of drug_name or ndc_code is required."
+      },
+      tier: {
+        type: "number",
+        description: "For search_formulary: Tier number to filter by (1=Preferred Generic, 2=Generic, 3=Preferred Brand, 4=Non-Preferred Brand, 5=Specialty, 6=Select Care)."
+      },
+      requires_prior_auth: {
+        type: "boolean",
+        description: "For search_formulary: Filter by prior authorization requirement (true=requires PA, false=no PA required)."
+      },
+      has_quantity_limit: {
+        type: "boolean",
+        description: "For search_formulary: Filter by quantity limit (true=has limit, false=no limit)."
+      },
+      has_step_therapy: {
+        type: "boolean",
+        description: "For search_formulary: Filter by step therapy requirement (true=requires ST, false=no ST required)."
+      },
+      plan_state: {
+        type: "string",
+        description: "For search_formulary: State abbreviation to filter plans (e.g., 'CA', 'TX', 'NY')."
+      },
+      plan_id: {
+        type: "string",
+        description: "For search_formulary: Medicare Part D plan ID to filter by specific plan."
       }
     },
     required: ["method"]
@@ -770,6 +809,210 @@ async function searchSpending(
   };
 }
 
+/**
+ * Search Medicare Part D Formulary data from local files
+ * Uses RxNorm API to lookup RXCUI from drug names, then searches formulary
+ */
+async function searchFormulary(
+  drug_name?: string,
+  ndc_code?: string,
+  tier?: number,
+  requires_prior_auth?: boolean,
+  has_quantity_limit?: boolean,
+  has_step_therapy?: boolean,
+  plan_state?: string,
+  plan_id?: string,
+  size: number = 25,
+  offset: number = 0
+): Promise<any> {
+  const formularyPath = path.join(__dirname, 'data', 'formulary', 'formulary.txt');
+  const plansPath = path.join(__dirname, 'data', 'formulary', 'plans.txt');
+
+  if (!fs.existsSync(formularyPath)) {
+    throw new Error(`Formulary data file not found at ${formularyPath}`);
+  }
+
+  // If drug name provided, lookup RXCUI codes from RxNorm API
+  let targetRxcuis: string[] = [];
+  if (drug_name) {
+    try {
+      const rxnormUrl = `https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(drug_name)}`;
+      const rxnormResponse = await fetch(rxnormUrl);
+      const rxnormData = await rxnormResponse.json() as any;
+
+      if (rxnormData.drugGroup?.conceptGroup) {
+        for (const group of rxnormData.drugGroup.conceptGroup) {
+          if (group.conceptProperties) {
+            targetRxcuis = group.conceptProperties.map((prop: any) => prop.rxcui);
+            break;
+          }
+        }
+      }
+
+      if (targetRxcuis.length === 0) {
+        return {
+          total: 0,
+          offset: offset,
+          limit: size,
+          drug_name_searched: drug_name,
+          rxcuis_found: [],
+          message: `No RXCUI codes found for drug name: ${drug_name}`,
+          formulary_entries: []
+        };
+      }
+    } catch (error) {
+      throw new Error(`RxNorm API error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  // Load plan info for state filtering and plan name lookups
+  const planMap = new Map<string, any>();
+  const validFormularyIds = new Set<string>();
+
+  if (fs.existsSync(plansPath)) {
+    const planStream = fs.createReadStream(plansPath);
+    const planRL = readline.createInterface({ input: planStream, crlfDelay: Infinity });
+    let isFirstLine = true;
+
+    for await (const line of planRL) {
+      if (isFirstLine) {
+        isFirstLine = false;
+        continue;
+      }
+      const values = line.split('|');
+      const formularyId = values[5]; // FORMULARY_ID
+      const state = values[10]; // STATE
+
+      // Apply state filter if specified
+      if (plan_state && state !== plan_state) {
+        continue;
+      }
+
+      validFormularyIds.add(formularyId);
+
+      if (!planMap.has(formularyId)) {
+        planMap.set(formularyId, {
+          contract_id: values[0],
+          plan_id: values[1],
+          plan_name: values[4],
+          formulary_id: formularyId,
+          state: state
+        });
+      }
+    }
+  }
+
+  // Stream through formulary file and apply filters
+  const fileStream = fs.createReadStream(formularyPath);
+  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+
+  const results: any[] = [];
+  let matchCount = 0;
+  let lineNum = 0;
+
+  for await (const line of rl) {
+    lineNum++;
+    if (lineNum === 1) continue; // Skip header
+
+    const values = line.split('|');
+    const formularyId = values[0];
+    const rxcui = values[3];
+    const ndc = values[4];
+    const tierValue = values[5];
+    const quantityLimitYN = values[6];
+    const priorAuthYN = values[9];
+    const stepTherapyYN = values[10];
+
+    // Apply filters
+    let matches = true;
+
+    // Filter by formulary ID (from plan/state filter)
+    if (plan_state && !validFormularyIds.has(formularyId)) {
+      matches = false;
+    }
+
+    // Filter by plan ID
+    if (plan_id && formularyId !== plan_id) {
+      matches = false;
+    }
+
+    // Filter by RXCUI (from drug name lookup)
+    if (drug_name && targetRxcuis.length > 0 && !targetRxcuis.includes(rxcui)) {
+      matches = false;
+    }
+
+    // Filter by NDC
+    if (ndc_code && ndc !== ndc_code) {
+      matches = false;
+    }
+
+    // Filter by tier
+    if (tier !== undefined && tierValue !== String(tier)) {
+      matches = false;
+    }
+
+    // Filter by prior authorization
+    if (requires_prior_auth !== undefined) {
+      const hasPriorAuth = priorAuthYN === 'Y';
+      if (requires_prior_auth !== hasPriorAuth) {
+        matches = false;
+      }
+    }
+
+    // Filter by quantity limit
+    if (has_quantity_limit !== undefined) {
+      const hasQL = quantityLimitYN === 'Y';
+      if (has_quantity_limit !== hasQL) {
+        matches = false;
+      }
+    }
+
+    // Filter by step therapy
+    if (has_step_therapy !== undefined) {
+      const hasST = stepTherapyYN === 'Y';
+      if (has_step_therapy !== hasST) {
+        matches = false;
+      }
+    }
+
+    if (matches) {
+      matchCount++;
+
+      // Apply pagination
+      if (matchCount > offset && results.length < size) {
+        const planInfo = planMap.get(formularyId);
+        results.push({
+          formulary_id: formularyId,
+          plan_name: planInfo?.plan_name || 'Unknown',
+          state: planInfo?.state || 'Unknown',
+          rxcui: rxcui,
+          ndc: ndc,
+          tier_level: parseInt(tierValue),
+          quantity_limit: quantityLimitYN === 'Y',
+          quantity_limit_amount: values[7],
+          quantity_limit_days: values[8],
+          prior_authorization: priorAuthYN === 'Y',
+          step_therapy: stepTherapyYN === 'Y'
+        });
+      }
+
+      // Stop if we have enough results
+      if (results.length >= size) {
+        break;
+      }
+    }
+  }
+
+  return {
+    total: matchCount,
+    offset: offset,
+    limit: size,
+    drug_name_searched: drug_name,
+    rxcuis_found: targetRxcuis,
+    formulary_entries: results
+  };
+}
+
 
 function sendError(res: http.ServerResponse, message: string, code: number = 400) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
@@ -866,8 +1109,24 @@ async function runServer() {
                 return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
               }
 
+              case 'search_formulary': {
+                const result = await searchFormulary(
+                  (args as any)?.formulary_drug_name,
+                  (args as any)?.ndc_code,
+                  (args as any)?.tier,
+                  (args as any)?.requires_prior_auth,
+                  (args as any)?.has_quantity_limit,
+                  (args as any)?.has_step_therapy,
+                  (args as any)?.plan_state,
+                  (args as any)?.plan_id,
+                  (args as any)?.size,
+                  (args as any)?.offset
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
               default:
-                throw new McpError(-32602, `Unknown method: ${method}. Valid methods: search_providers, search_prescribers, search_hospitals, search_spending`);
+                throw new McpError(-32602, `Unknown method: ${method}. Valid methods: search_providers, search_prescribers, search_hospitals, search_spending, search_formulary`);
             }
           }
           default:
@@ -938,6 +1197,9 @@ async function runServer() {
                 break;
               case 'search_spending':
                 result = await searchSpending(data.spending_drug_name, data.spending_type, data.year, data.size, data.offset, data.sort);
+                break;
+              case 'search_formulary':
+                result = await searchFormulary(data.formulary_drug_name, data.ndc_code, data.tier, data.requires_prior_auth, data.has_quantity_limit, data.has_step_therapy, data.plan_state, data.plan_id, data.size, data.offset);
                 break;
               default:
                 sendError(res, `Unknown method: ${methodName}`, 400);
