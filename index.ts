@@ -107,46 +107,50 @@ function getLatestYear(versionMap: { [year: string]: string }): string {
   return Object.keys(versionMap).sort().pop()!;
 }
 
-export const SEARCH_MEDICARE_TOOL: Tool = {
-  name: "cms_search_providers",
-  description: "Search Medicare Physician & Other Practitioners data using the Centers for Medicare & Medicaid Services (CMS) database. This data includes information about services and procedures provided to Original Medicare Part B beneficiaries.",
+export const MEDICARE_INFO_TOOL: Tool = {
+  name: "medicare_info",
+  description: "Unified tool for Medicare data operations: provider data, Part D formulary coverage, and plan information. Use the method parameter to specify the operation type.",
   input_schema: {
     type: "object",
     properties: {
+      method: {
+        type: "string",
+        description: "The operation to perform: search_providers (Medicare provider & service data), search_formulary (Part D formulary & drug coverage), or search_payers (Medicare plan/payer information). Valid values: 'search_providers', 'search_formulary', 'search_payers'"
+      },
       dataset_type: {
         type: "string",
-        description: "Type of dataset to search. Options:\n" +
+        description: "For search_providers: Type of dataset to search. Options:\n" +
           "- 'geography_and_service': Use when you need to compare regions, analyze geographic patterns, study regional variations in healthcare delivery, understand geographic distribution of healthcare services, or calculate per-capita/per-beneficiary rates by region.\n" +
           "- 'provider_and_service': Use when you need to analyze individual provider performance, track specific procedures by provider, calculate total procedures across providers, or study provider-level service patterns and outcomes.\n" +
           "- 'provider': Use when you need to analyze provider demographics, study provider participation in Medicare, understand provider practice patterns, or examine provider-level beneficiary characteristics and risk scores."
       },
       year: {
         type: "string",
-        description: "Year of the dataset to query (2013 to latest available year, defaults to latest year)."
+        description: "For search_providers: Year of the dataset to query (2013 to latest available year, defaults to latest year)."
       },
       hcpcs_code: {
         type: "string",
-        description: "HCPCS code to search for (e.g., '99213' for established patient office visit)."
+        description: "For search_providers: HCPCS code to search for (e.g., '99213' for established patient office visit)."
       },
       provider_type: {
         type: "string",
-        description: "Type of provider to search for (e.g., 'Cardiology', 'Podiatry', 'Family Practice')."
+        description: "For search_providers: Type of provider to search for (e.g., 'Cardiology', 'Podiatry', 'Family Practice')."
       },
       geo_level: {
         type: "string",
-        description: "Geographic level for filtering (e.g., 'National', 'State', 'County', 'ZIP')."
+        description: "For search_providers: Geographic level for filtering (e.g., 'National', 'State', 'County', 'ZIP')."
       },
       geo_code: {
         type: "string",
-        description: "Geographic code to filter by (e.g., 'CA' for California, '06037' for Los Angeles County)."
+        description: "For search_providers: Geographic code to filter by (e.g., 'CA' for California, '06037' for Los Angeles County)."
       },
       place_of_service: {
         type: "string",
-        description: "Place of service code to filter by (e.g., 'F' for facility, 'O' for office, 'H' for hospital)."
+        description: "For search_providers: Place of service code to filter by (e.g., 'F' for facility, 'O' for office, 'H' for hospital)."
       },
       size: {
         type: "number",
-        description: "Number of results to return (default: 10, max: 5000)."
+        description: "Number of results to return (default: 10 for search_providers, 25 for search_formulary, max: 5000)."
       },
       offset: {
         type: "number",
@@ -154,14 +158,14 @@ export const SEARCH_MEDICARE_TOOL: Tool = {
       },
       sort_by: {
         type: "string",
-        description: "Field to sort results by (e.g., 'Tot_Srvcs', 'Tot_Benes', 'Tot_Mdcr_Pymt_Amt')."
+        description: "For search_providers: Field to sort results by (e.g., 'Tot_Srvcs', 'Tot_Benes', 'Tot_Mdcr_Pymt_Amt')."
       },
       sort_order: {
         type: "string",
-        description: "Sort order ('asc' or 'desc', default: 'desc')."
+        description: "For search_providers: Sort order ('asc' or 'desc', default: 'desc')."
       }
     },
-    required: ["dataset_type"]
+    required: ["method"]
   },
   responseSchema: {
     type: "object",
@@ -536,9 +540,9 @@ async function runServer() {
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: [
         {
-          name: SEARCH_MEDICARE_TOOL.name,
-          description: SEARCH_MEDICARE_TOOL.description,
-          inputSchema: SEARCH_MEDICARE_TOOL.input_schema
+          name: MEDICARE_INFO_TOOL.name,
+          description: MEDICARE_INFO_TOOL.description,
+          inputSchema: MEDICARE_INFO_TOOL.input_schema
         }
       ]
     }));
@@ -548,21 +552,36 @@ async function runServer() {
       const args = request.params?.arguments;
       try {
         switch (toolName) {
-          case 'cms_search_providers': {
-            const result = await searchMedicare(
-              (args as any)?.dataset_type,
-              (args as any)?.year,
-              (args as any)?.hcpcs_code,
-              (args as any)?.geo_level,
-              (args as any)?.geo_code,
-              (args as any)?.place_of_service,
-              (args as any)?.size,
-              (args as any)?.offset,
-              (args as any)?.text_search,
-              (args as any)?.sort,
-              (args as any)?.provider_type
-            );
-            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+          case 'medicare_info': {
+            const method = (args as any)?.method;
+
+            switch (method) {
+              case 'search_providers': {
+                const result = await searchMedicare(
+                  (args as any)?.dataset_type,
+                  (args as any)?.year,
+                  (args as any)?.hcpcs_code,
+                  (args as any)?.geo_level,
+                  (args as any)?.geo_code,
+                  (args as any)?.place_of_service,
+                  (args as any)?.size,
+                  (args as any)?.offset,
+                  (args as any)?.text_search,
+                  (args as any)?.sort,
+                  (args as any)?.provider_type
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
+              case 'search_formulary':
+                throw new McpError(-32603, 'search_formulary not yet implemented');
+
+              case 'search_payers':
+                throw new McpError(-32603, 'search_payers not yet implemented');
+
+              default:
+                throw new McpError(-32602, `Unknown method: ${method}. Valid methods: search_providers, search_formulary, search_payers`);
+            }
           }
           default:
             throw new McpError(-32603, 'Unknown tool');
@@ -591,10 +610,10 @@ async function runServer() {
         res.end(JSON.stringify({
           tools: [
             {
-              name: SEARCH_MEDICARE_TOOL.name,
-              description: SEARCH_MEDICARE_TOOL.description,
-              input_schema: SEARCH_MEDICARE_TOOL.input_schema,
-              responseSchema: SEARCH_MEDICARE_TOOL.responseSchema
+              name: MEDICARE_INFO_TOOL.name,
+              description: MEDICARE_INFO_TOOL.description,
+              input_schema: MEDICARE_INFO_TOOL.input_schema,
+              responseSchema: MEDICARE_INFO_TOOL.responseSchema
             }
           ]
         }));
@@ -617,8 +636,23 @@ async function runServer() {
         try {
           data = await parseBody(req);
           const url = req.url || '';
-          if (url === '/cms_search_providers') {
-            result = await searchMedicare(data.dataset_type, data.year, data.hcpcs_code, data.geo_level, data.geo_code, data.place_of_service, data.size, data.offset, data.text_search, data.sort, data.provider_type);
+          if (url === '/medicare_info') {
+            const methodName = data.method;
+
+            switch (methodName) {
+              case 'search_providers':
+                result = await searchMedicare(data.dataset_type, data.year, data.hcpcs_code, data.geo_level, data.geo_code, data.place_of_service, data.size, data.offset, data.text_search, data.sort, data.provider_type);
+                break;
+              case 'search_formulary':
+                sendError(res, 'search_formulary not yet implemented', 501);
+                return;
+              case 'search_payers':
+                sendError(res, 'search_payers not yet implemented', 501);
+                return;
+              default:
+                sendError(res, `Unknown method: ${methodName}`, 400);
+                return;
+            }
           } else {
             sendError(res, 'Not found', 404);
             return;
