@@ -1,20 +1,32 @@
 # Unofficial Medicare MCP Server
 
-A Model Context Protocol (MCP) server providing access to **CMS Medicare Physician & Other Practitioners data** from 2013-2023. This server enables AI assistants and applications to search and analyze Medicare provider data, including service volumes, beneficiary demographics, and payment information.
+A Model Context Protocol (MCP) server providing comprehensive access to **CMS Medicare data**, including physician/practitioner services (2013-2023) and Medicare Part D formulary coverage information. This server enables AI assistants and applications to search and analyze Medicare provider data, drug coverage, and payment information.
 
 ## Features
 
-- **Historical Data**: CMS Medicare data from 2013-2023 with automatic latest-year selection
+- **Provider Data**: CMS Medicare Physician & Other Practitioners data from 2013-2023 with automatic latest-year selection
+- **Formulary Data**: Medicare Part D drug coverage, including tier information, utilization management requirements, and beneficiary cost sharing
 - **Three Dataset Types**: Geography & Service, Provider & Service, and Provider demographics
 - **Flexible Querying**: Advanced filtering, pagination, and field selection
 - **TypeScript**: Fully typed codebase with strict mode enabled
 - **Production Ready**: Docker support, health checks, and comprehensive logging
+- **Unified Tool Interface**: Single `medicare_info` tool with method-based routing for different data types
 
 ## Tool Description
 
-### CMS Medicare Provider Search
+### Medicare Info Tool
 
-The `cms_search_providers` tool provides access to Medicare Physician & Other Practitioners data using the Centers for Medicare & Medicaid Services (CMS) database. This data includes information about services and procedures provided to Original Medicare Part B beneficiaries. The tool supports data from 2013 to the latest available year, defaulting to the latest year if not specified.
+The `medicare_info` tool provides unified access to Medicare data using the `method` parameter to select the operation type:
+
+1. **`search_providers`**: Medicare Physician & Other Practitioners data (2013-2023)
+2. **`search_formulary`**: Medicare Part D formulary and drug coverage information
+3. **`search_payers`**: Medicare plan/payer information (coming soon)
+
+---
+
+## Method 1: search_providers
+
+Search Medicare Physician & Other Practitioners data using the Centers for Medicare & Medicaid Services (CMS) database. This data includes information about services and procedures provided to Original Medicare Part B beneficiaries. The tool supports data from 2013 to the latest available year, defaulting to the latest year if not specified.
 
 #### Parameters
 
@@ -253,6 +265,164 @@ The response fields vary by dataset type:
    - Track standardized payment amounts
    - Monitor Medicare payment trends
 
+---
+
+## Method 2: search_formulary
+
+Search Medicare Part D formulary data to find drug coverage information across plans. This method provides access to the monthly prescription drug plan formulary files from CMS, including tier information, utilization management requirements (prior authorization, quantity limits, step therapy), and coverage details.
+
+### Parameters
+
+- **`method`** (required): Must be set to `"search_formulary"`
+
+**Drug Identification** (at least one required):
+- **`drug_name`** (optional): Drug name to search for (partial match supported, e.g., 'metformin', 'insulin', 'atorvastatin')
+- **`ndc_code`** (optional): NDC (National Drug Code) for exact drug identification (e.g., '00002-7510-01')
+
+**Plan Filters** (optional):
+- **`plan_id`**: Medicare Part D plan ID to filter by specific plan
+- **`plan_state`**: State abbreviation to filter plans (e.g., 'CA', 'TX', 'NY')
+
+**Coverage Filters** (optional):
+- **`tier`**: Tier number to filter by (1-6):
+  - 1 = Preferred Generic
+  - 2 = Generic
+  - 3 = Preferred Brand
+  - 4 = Non-Preferred Brand
+  - 5 = Specialty Tier
+  - 6 = Select Care Drugs
+- **`requires_prior_auth`**: Filter by prior authorization requirement (true/false)
+- **`has_quantity_limit`**: Filter by quantity limit (true/false)
+- **`has_step_therapy`**: Filter by step therapy requirement (true/false)
+
+**Pagination** (optional):
+- **`size`**: Number of results to return (default: 100, max: 5000)
+- **`offset`**: Starting result number for pagination (default: 0)
+
+### Response Format
+
+```json
+{
+  "total": 1234,
+  "formulary_entries": [
+    {
+      "ndcCode": "00002-7510-01",
+      "drugName": "HUMALOG MIX 75-25 KWIKPEN U-100 INSULIN",
+      "rxcui": "261551",
+      "contractId": "S1234",
+      "planId": "001",
+      "segmentId": "001",
+      "tierId": "3",
+      "tierLevel": "Preferred Brand",
+      "priorAuthRequired": false,
+      "quantityLimit": true,
+      "stepTherapyRequired": false,
+      "formularyId": "12345",
+      "dataMonth": "2024-11"
+    }
+  ],
+  "data_source": {
+    "dataset": "Monthly Prescription Drug Plan Formulary and Pharmacy Network Information",
+    "month": "2024-11",
+    "file_date": "2024-11-19"
+  }
+}
+```
+
+### Example Queries
+
+#### 1. Find all plans covering metformin
+```json
+{
+  "method": "search_formulary",
+  "drug_name": "metformin",
+  "size": 100
+}
+```
+
+#### 2. Search for insulin coverage in California plans
+```json
+{
+  "method": "search_formulary",
+  "drug_name": "insulin",
+  "plan_state": "CA",
+  "size": 50
+}
+```
+
+#### 3. Find drugs requiring prior authorization
+```json
+{
+  "method": "search_formulary",
+  "drug_name": "semaglutide",
+  "requires_prior_auth": true
+}
+```
+
+#### 4. Search by exact NDC code
+```json
+{
+  "method": "search_formulary",
+  "ndc_code": "00002-7510-01"
+}
+```
+
+#### 5. Find specialty tier drugs (Tier 5)
+```json
+{
+  "method": "search_formulary",
+  "drug_name": "lenalidomide",
+  "tier": 5
+}
+```
+
+#### 6. Find generic drugs without utilization management
+```json
+{
+  "method": "search_formulary",
+  "drug_name": "lisinopril",
+  "tier": 2,
+  "requires_prior_auth": false,
+  "has_quantity_limit": false,
+  "has_step_therapy": false
+}
+```
+
+### Common Use Cases
+
+1. **Drug Coverage Analysis**
+   - Compare coverage across multiple Part D plans
+   - Identify plans with favorable tier placement
+   - Find plans without utilization management restrictions
+
+2. **Formulary Research**
+   - Analyze tier placement across plans
+   - Identify prior authorization requirements
+   - Compare quantity limits and step therapy requirements
+
+3. **Cost Analysis**
+   - Find plans with preferred generic tier placement
+   - Identify specialty tier drugs requiring extra support
+   - Compare coverage for therapeutic equivalents
+
+4. **Patient Support**
+   - Identify plans covering specific medications
+   - Find alternatives without prior authorization
+   - Locate plans with lower tier placement
+
+### Notes
+
+- Data is cached for 1 hour in memory for performance
+- Formulary files are downloaded monthly from data.cms.gov
+- ZIP files (~50-100MB) are cached locally for 30 days
+- At least one drug identification parameter (drug_name or ndc_code) is required
+- Drug name searches support partial matching (case-insensitive)
+- NDC code searches require exact match
+- Tier descriptions follow CMS standard tier structure
+- Utilization management indicators: Y/N converted to boolean in response
+
+---
+
 ## Configuration
 
 ### MCP Client Configuration
@@ -274,7 +444,7 @@ To use this server with Claude Desktop or other MCP clients, add the following t
 
 ## Notes
 
-### Medicare Provider Search
+### search_providers Method
 - The data spans from 2013 to 2023 Medicare Physician & Other Practitioners datasets
 - The tool defaults to the latest available year if not specified
 - Data availability may vary by year and dataset type
@@ -283,3 +453,18 @@ To use this server with Claude Desktop or other MCP clients, add the following t
 - All monetary amounts are in USD
 - Geographic codes follow standard state/county/ZIP code formats
 - Results are limited to 5000 items per request
+
+### search_formulary Method
+- Data comes from CMS Monthly Prescription Drug Plan Formulary files
+- Formulary ZIP files (~50-100MB) are cached locally for 30 days at `~/.cache/medicare-mcp/formulary/`
+- Parsed data is cached in memory for 1 hour for performance
+- At least one drug identification parameter (drug_name or ndc_code) is required
+- Drug name searches are case-insensitive with partial matching
+- Tier structure follows CMS standard (1-6)
+- Utilization management fields (PA, QL, ST) returned as booleans
+- Data is updated monthly by CMS
+
+### Breaking Changes
+- **v0.3.0**: Tool renamed from `cms_search_providers` to `medicare_info` with method-based routing
+  - Migration: Change tool calls from `cms_search_providers` to `medicare_info` with `method: "search_providers"`
+  - All existing parameters for provider search remain unchanged

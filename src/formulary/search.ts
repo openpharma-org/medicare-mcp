@@ -102,9 +102,9 @@ function filterRecords(records: FormularyRecord[], params: FormularySearchParams
  * Search Medicare Part D formulary
  */
 export async function searchFormulary(params: FormularySearchParams): Promise<FormularySearchResult> {
-  // Validate: at least one drug identification parameter required
-  if (!params.drug_name && !params.ndc_code) {
-    throw new Error('At least one drug identification parameter (drug_name or ndc_code) is required');
+  // Validate: at least one drug identification parameter required (unless filtering by plan)
+  if (!params.drug_name && !params.ndc_code && !params.plan_id) {
+    throw new Error('At least one of drug_name, ndc_code, or plan_id is required');
   }
 
   // Load dataset
@@ -154,7 +154,6 @@ export async function getPlanFormulary(planId: string, options?: {
   offset?: number;
 }): Promise<FormularySearchResult> {
   return searchFormulary({
-    drug_name: '*',  // Wildcard to get all drugs
     plan_id: planId,
     tier: options?.tier,
     size: options?.size || 100,
