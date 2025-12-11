@@ -1,34 +1,34 @@
 {
-  "name": "@openpharma-org/healthcare-data-mcp-server",
-  "version": "0.2.14",
-  "description": "Healthcare Data MCP server providing access to NLM and CMS data sources.",
+  "name": "@openpharma-org/medicare-mcp-server",
+  "version": "0.3.0",
+  "description": "Medicare MCP server providing access to CMS Medicare Physician & Other Practitioners data (2013-2023).",
   "license": "MIT",
   "type": "module",
   "author": "Joan Saez-Pons (https://github.com/openpharma-org)",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/openpharma-org/healthcare_data_mcp_server.git"
+    "url": "git+https://github.com/openpharma-org/medicare-mcp-server.git"
   },
   "bugs": {
-    "url": "https://github.com/openpharma-org/healthcare_data_mcp_server/issues"
+    "url": "https://github.com/openpharma-org/medicare-mcp-server/issues"
   },
-  "homepage": "https://github.com/openpharma-org/healthcare_data_mcp_server#readme",
+  "homepage": "https://github.com/openpharma-org/medicare-mcp-server#readme",
   "keywords": [
-    "healthcare",
-    "nlm",
-    "cms",
     "medicare",
-    "icd10cm",
-    "npi",
+    "cms",
+    "healthcare",
+    "providers",
     "mcp",
     "api",
-    "server"
+    "server",
+    "physician",
+    "beneficiaries"
   ],
   "publishConfig": {
     "access": "public"
   },
   "bin": {
-    "healthcare-data-mcp-server": "dist/index.js"
+    "medicare-mcp-server": "dist/index.js"
   },
   "files": [
     "dist",
