@@ -5,6 +5,7 @@ import 'dotenv/config';
 import http from 'http';
 import { URLSearchParams } from "url";
 import { Tool } from "./types";
+import { searchFormulary } from './src/formulary/search.js';
 
 /**
  * Logging utility for consistent log format across the application
@@ -163,6 +164,38 @@ export const MEDICARE_INFO_TOOL: Tool = {
       sort_order: {
         type: "string",
         description: "For search_providers: Sort order ('asc' or 'desc', default: 'desc')."
+      },
+      drug_name: {
+        type: "string",
+        description: "For search_formulary: Drug name to search for (partial match supported, e.g., 'metformin', 'insulin'). At least one of drug_name or ndc_code is required."
+      },
+      ndc_code: {
+        type: "string",
+        description: "For search_formulary: NDC (National Drug Code) for exact drug identification (e.g., '00002-7510-01'). At least one of drug_name or ndc_code is required."
+      },
+      plan_id: {
+        type: "string",
+        description: "For search_formulary: Medicare Part D plan ID to filter by specific plan."
+      },
+      plan_state: {
+        type: "string",
+        description: "For search_formulary: State abbreviation to filter plans (e.g., 'CA', 'TX', 'NY')."
+      },
+      tier: {
+        type: "number",
+        description: "For search_formulary: Tier number to filter by (1=Preferred Generic, 2=Generic, 3=Preferred Brand, 4=Non-Preferred Brand, 5=Specialty, 6=Select Care)."
+      },
+      requires_prior_auth: {
+        type: "boolean",
+        description: "For search_formulary: Filter by prior authorization requirement (true=requires PA, false=no PA required)."
+      },
+      has_quantity_limit: {
+        type: "boolean",
+        description: "For search_formulary: Filter by quantity limit (true=has limit, false=no limit)."
+      },
+      has_step_therapy: {
+        type: "boolean",
+        description: "For search_formulary: Filter by step therapy requirement (true=requires ST, false=no ST required)."
       }
     },
     required: ["method"]
@@ -573,8 +606,21 @@ async function runServer() {
                 return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
               }
 
-              case 'search_formulary':
-                throw new McpError(-32603, 'search_formulary not yet implemented');
+              case 'search_formulary': {
+                const formularyResult = await searchFormulary({
+                  drug_name: (args as any)?.drug_name,
+                  ndc_code: (args as any)?.ndc_code,
+                  plan_id: (args as any)?.plan_id,
+                  plan_state: (args as any)?.plan_state,
+                  tier: (args as any)?.tier,
+                  requires_prior_auth: (args as any)?.requires_prior_auth,
+                  has_quantity_limit: (args as any)?.has_quantity_limit,
+                  has_step_therapy: (args as any)?.has_step_therapy,
+                  size: (args as any)?.size,
+                  offset: (args as any)?.offset
+                });
+                return { content: [{ type: 'text', text: JSON.stringify(formularyResult, null, 2) }], isError: false };
+              }
 
               case 'search_payers':
                 throw new McpError(-32603, 'search_payers not yet implemented');
@@ -644,8 +690,19 @@ async function runServer() {
                 result = await searchMedicare(data.dataset_type, data.year, data.hcpcs_code, data.geo_level, data.geo_code, data.place_of_service, data.size, data.offset, data.text_search, data.sort, data.provider_type);
                 break;
               case 'search_formulary':
-                sendError(res, 'search_formulary not yet implemented', 501);
-                return;
+                result = await searchFormulary({
+                  drug_name: data.drug_name,
+                  ndc_code: data.ndc_code,
+                  plan_id: data.plan_id,
+                  plan_state: data.plan_state,
+                  tier: data.tier,
+                  requires_prior_auth: data.requires_prior_auth,
+                  has_quantity_limit: data.has_quantity_limit,
+                  has_step_therapy: data.has_step_therapy,
+                  size: data.size,
+                  offset: data.offset
+                });
+                break;
               case 'search_payers':
                 sendError(res, 'search_payers not yet implemented', 501);
                 return;
