@@ -1,4 +1,4 @@
-# Unoficial Medicare MCP Server
+# Unofficial Medicare MCP Server
 
 A Model Context Protocol (MCP) server providing access to **CMS Medicare Physician & Other Practitioners data** from 2013-2023. This server enables AI assistants and applications to search and analyze Medicare provider data, including service volumes, beneficiary demographics, and payment information.
 
