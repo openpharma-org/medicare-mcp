@@ -28,6 +28,10 @@ build/
 temp/
 tmp/
 
+# Formulary data - keep only compressed versions
+data/formulary/*.txt
+!data/formulary/.last-update
+
 # Python files (if any)
 *.py
 *.pyc

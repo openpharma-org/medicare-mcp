@@ -8,6 +8,7 @@ import { Tool } from "./types";
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
+import * as zlib from 'zlib';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -825,8 +826,12 @@ async function searchFormulary(
   size: number = 25,
   offset: number = 0
 ): Promise<any> {
-  const formularyPath = path.join(__dirname, 'data', 'formulary', 'formulary.txt');
-  const plansPath = path.join(__dirname, 'data', 'formulary', 'plans.txt');
+  // Support both .txt and .txt.gz files
+  const formularyBasePath = path.join(__dirname, 'data', 'formulary', 'formulary.txt');
+  const plansBasePath = path.join(__dirname, 'data', 'formulary', 'plans.txt');
+
+  const formularyPath = fs.existsSync(formularyBasePath + '.gz') ? formularyBasePath + '.gz' : formularyBasePath;
+  const plansPath = fs.existsSync(plansBasePath + '.gz') ? plansBasePath + '.gz' : plansBasePath;
 
   if (!fs.existsSync(formularyPath)) {
     throw new Error(`Formulary data file not found at ${formularyPath}`);
@@ -870,7 +875,9 @@ async function searchFormulary(
   const validFormularyIds = new Set<string>();
 
   if (fs.existsSync(plansPath)) {
-    const planStream = fs.createReadStream(plansPath);
+    // Handle both .txt and .txt.gz files
+    const planFileStream = fs.createReadStream(plansPath);
+    const planStream = plansPath.endsWith('.gz') ? planFileStream.pipe(zlib.createGunzip()) : planFileStream;
     const planRL = readline.createInterface({ input: planStream, crlfDelay: Infinity });
     let isFirstLine = true;
 
@@ -903,8 +910,10 @@ async function searchFormulary(
   }
 
   // Stream through formulary file and apply filters
-  const fileStream = fs.createReadStream(formularyPath);
-  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+  // Handle both .txt and .txt.gz files
+  const formularyFileStream = fs.createReadStream(formularyPath);
+  const formularyStream = formularyPath.endsWith('.gz') ? formularyFileStream.pipe(zlib.createGunzip()) : formularyFileStream;
+  const rl = readline.createInterface({ input: formularyStream, crlfDelay: Infinity });
 
   const results: any[] = [];
   let matchCount = 0;

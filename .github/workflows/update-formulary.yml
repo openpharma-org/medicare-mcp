@@ -1,0 +1,121 @@
+name: Update Formulary Data
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Run daily at 3 AM UTC
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Fetch latest formulary URL from CMS
+        id: fetch-url
+        run: |
+          echo "Fetching latest formulary metadata from CMS data.json..."
+          LATEST_URL=$(curl -s "https://data.cms.gov/data.json" | \
+            jq -r '.dataset[] | select(.title | contains("Monthly Prescription")) | .distribution[0].downloadURL')
+
+          echo "Latest URL: $LATEST_URL"
+          echo "FORMULARY_URL=$LATEST_URL" >> $GITHUB_ENV
+
+          # Extract filename from URL for comparison
+          LATEST_FILENAME=$(basename "$LATEST_URL")
+          echo "LATEST_FILENAME=$LATEST_FILENAME" >> $GITHUB_ENV
+          echo "Latest filename: $LATEST_FILENAME"
+
+      - name: Check if update needed
+        id: check-update
+        run: |
+          # Create metadata file if it doesn't exist
+          mkdir -p data/formulary
+          touch data/formulary/.last-update
+
+          CURRENT_VERSION=$(cat data/formulary/.last-update || echo "none")
+          echo "Current version: $CURRENT_VERSION"
+          echo "Latest version: $LATEST_FILENAME"
+
+          if [ "$CURRENT_VERSION" = "$LATEST_FILENAME" ]; then
+            echo "No update needed - already have latest version"
+            echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
+          else
+            echo "Update needed - new version available"
+            echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
+          fi
+
+      - name: Download and extract formulary (only if update needed)
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          echo "Downloading formulary bundle from: $FORMULARY_URL"
+          wget -q --show-progress -O /tmp/formulary.zip "$FORMULARY_URL"
+
+          echo "Extracting bundle..."
+          cd /tmp && unzip -q formulary.zip
+
+          # Find the extracted directory (name varies)
+          EXTRACT_DIR=$(find /tmp -maxdepth 1 -type d -name "202*" | head -1)
+          echo "Extracted to: $EXTRACT_DIR"
+
+          cd "$EXTRACT_DIR"
+
+          # Extract only the 3 files we need
+          echo "Extracting relevant files..."
+          mkdir -p extracted
+          unzip -q -j "basic drugs formulary file*.zip" -d extracted/
+          unzip -q -j "plan information*.zip" -d extracted/
+          unzip -q -j "beneficiary cost file*.zip" -d extracted/
+
+          # Move to repo data folder with standard names
+          echo "Moving files to data directory..."
+          mv extracted/basic*.txt $GITHUB_WORKSPACE/data/formulary/formulary.txt
+          mv extracted/plan*.txt $GITHUB_WORKSPACE/data/formulary/plans.txt
+          mv extracted/beneficiary*.txt $GITHUB_WORKSPACE/data/formulary/costs.txt
+
+          # Save version info
+          echo "$LATEST_FILENAME" > $GITHUB_WORKSPACE/data/formulary/.last-update
+
+          echo "Files extracted successfully:"
+          ls -lh $GITHUB_WORKSPACE/data/formulary/
+
+          # Cleanup temp files (free ~2.5 GB on runner)
+          echo "Cleaning up temporary files..."
+          rm -rf /tmp/formulary.zip /tmp/202*
+
+      - name: Compress files with gzip (only if update needed)
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          echo "Compressing formulary files..."
+          gzip -f data/formulary/formulary.txt
+          gzip -f data/formulary/plans.txt
+          gzip -f data/formulary/costs.txt
+
+          echo "Compressed files:"
+          ls -lh data/formulary/
+
+      - name: Commit and push (only if update needed)
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add data/formulary/
+          git commit -m "Update formulary data to $(cat data/formulary/.last-update | cut -d'_' -f2 | cut -d'.' -f1)
+
+          Source: CMS Monthly Prescription Drug Plan Formulary
+          File: $(cat data/formulary/.last-update)
+          Date: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+
+          git push
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ "$UPDATE_NEEDED" = "true" ]; then
+            echo "✅ Formulary data updated successfully"
+            echo "New version: $LATEST_FILENAME"
+          else
+            echo "ℹ️  No update needed - already have latest version"
+            echo "Current version: $(cat data/formulary/.last-update)"
+          fi

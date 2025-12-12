@@ -8,10 +8,12 @@ A Model Context Protocol (MCP) server providing comprehensive access to **CMS Me
 - **Prescriber Data**: Medicare Part D prescriber information by drug, provider, and geography
 - **Hospital Data**: Medicare inpatient hospital utilization and payment data
 - **Drug Spending**: Medicare Part D and Part B drug spending trends
+- **Formulary Data**: Medicare Part D plan formulary coverage with automated monthly updates
 - **Flexible Querying**: Advanced filtering, pagination, and field selection
 - **TypeScript**: Fully typed codebase with strict mode enabled
 - **Production Ready**: Docker support, health checks, and comprehensive logging
 - **Unified Tool Interface**: Single `medicare_info` tool with method-based routing for different data types
+- **Automated Updates**: GitHub Actions workflow for daily formulary data checks and updates
 
 ## Tool Description
 
@@ -23,6 +25,7 @@ The `medicare_info` tool provides unified access to Medicare data using the `met
 2. **`search_prescribers`**: Medicare Part D prescriber data by drug, provider NPI, specialty, and state
 3. **`search_hospitals`**: Medicare inpatient hospital utilization and payment data
 4. **`search_spending`**: Medicare Part D and Part B drug spending trends
+5. **`search_formulary`**: Medicare Part D plan formulary coverage (tier, prior auth, quantity limits, step therapy)
 
 ---
 
@@ -467,5 +470,124 @@ Search Medicare Part D and Part B drug spending trends. This method provides acc
   "year": "2022"
 }
 ```
+
+---
+
+## Method 5: search_formulary
+
+Search Medicare Part D plan formulary coverage using local CMS formulary data files. Returns drug coverage information including tier level, prior authorization requirements, quantity limits, and step therapy requirements across Medicare Part D plans.
+
+#### Parameters
+
+- `formulary_drug_name` (optional): Drug name to search for (partial match supported, e.g., 'metformin', 'insulin'). Uses RxNorm API to convert drug names to RXCUI codes. At least one of `formulary_drug_name` or `ndc_code` is required.
+- `ndc_code` (optional): NDC (National Drug Code) for exact drug identification (e.g., '00002143380'). At least one of `formulary_drug_name` or `ndc_code` is required.
+- `tier` (optional): Tier number to filter by:
+  - 1 = Preferred Generic
+  - 2 = Generic
+  - 3 = Preferred Brand
+  - 4 = Non-Preferred Brand
+  - 5 = Specialty
+  - 6 = Select Care
+- `requires_prior_auth` (optional): Filter by prior authorization requirement (true=requires PA, false=no PA required)
+- `has_quantity_limit` (optional): Filter by quantity limit (true=has limit, false=no limit)
+- `has_step_therapy` (optional): Filter by step therapy requirement (true=requires ST, false=no ST required)
+- `plan_state` (optional): State abbreviation to filter plans (e.g., 'CA', 'TX', 'NY')
+- `plan_id` (optional): Medicare Part D plan ID to filter by specific plan
+- `size` (optional): Number of results to return (default: 25, max: 5000)
+- `offset` (optional): Starting result number for pagination (default: 0)
+
+#### Response Fields
+
+- `total`: Total number of matching formulary entries
+- `offset`: Starting position for pagination
+- `limit`: Maximum results returned
+- `drug_name_searched`: Drug name that was searched (if provided)
+- `rxcuis_found`: Array of RXCUI codes found for the drug name
+- `formulary_entries`: Array of formulary entries with:
+  - `formulary_id`: Plan formulary ID
+  - `plan_name`: Medicare Part D plan name
+  - `state`: State where plan is available
+  - `rxcui`: RxNorm Concept Unique Identifier
+  - `ndc`: National Drug Code
+  - `tier_level`: Tier number (1-6)
+  - `quantity_limit`: Whether quantity limit applies (boolean)
+  - `quantity_limit_amount`: Maximum quantity allowed
+  - `quantity_limit_days`: Days supply for quantity limit
+  - `prior_authorization`: Whether prior authorization required (boolean)
+  - `step_therapy`: Whether step therapy required (boolean)
+
+#### Example Queries
+
+##### 1. Search by drug name
+```json
+{
+  "method": "search_formulary",
+  "formulary_drug_name": "metformin",
+  "size": 10
+}
+```
+
+##### 2. Find drugs without prior authorization in California
+```json
+{
+  "method": "search_formulary",
+  "formulary_drug_name": "insulin",
+  "plan_state": "CA",
+  "requires_prior_auth": false,
+  "size": 20
+}
+```
+
+##### 3. Search by NDC code
+```json
+{
+  "method": "search_formulary",
+  "ndc_code": "00002143380",
+  "size": 5
+}
+```
+
+##### 4. Find specialty tier drugs (tier 5)
+```json
+{
+  "method": "search_formulary",
+  "formulary_drug_name": "Humira",
+  "tier": 5
+}
+```
+
+---
+
+## Automated Formulary Data Updates
+
+The Medicare MCP Server includes a GitHub Actions workflow that automatically checks for new formulary data from CMS **daily** and updates the local files when new data is available.
+
+### How It Works
+
+1. **Daily Check**: GitHub Actions runs at 3 AM UTC every day
+2. **Version Comparison**: Compares latest CMS file with current version in `.last-update`
+3. **Conditional Download**: Only downloads if new version detected
+4. **Selective Extraction**: Downloads 2.5 GB bundle, extracts only 3 needed files (78 MB → 10.6 MB compressed)
+5. **Compression**: Compresses files with gzip (83-96% reduction)
+6. **Automatic Commit**: Commits and pushes updated data if changes detected
+
+### Data Files
+
+The server uses three compressed formulary data files:
+
+- `formulary.txt.gz` (9.5 MB) - 1.1M formulary entries across 332 plans
+- `plans.txt.gz` (485 KB) - 112K plan records with names, states, counties
+- `costs.txt.gz` (632 KB) - 173K cost-sharing records
+
+### Manual Update
+
+To manually trigger a formulary data update:
+
+1. Go to the [Actions tab](https://github.com/openpharma-org/medicare-mcp/actions/workflows/update-formulary.yml) in the repository
+2. Click "Run workflow"
+3. Select the branch (usually `main`)
+4. Click "Run workflow" button
+
+The workflow will check for updates and commit any changes automatically.
 
 ---
