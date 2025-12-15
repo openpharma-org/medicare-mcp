@@ -555,39 +555,3 @@ Search Medicare Part D plan formulary coverage using local CMS formulary data fi
   "tier": 5
 }
 ```
-
----
-
-## Automated Formulary Data Updates
-
-The Medicare MCP Server includes a GitHub Actions workflow that automatically checks for new formulary data from CMS **daily** and updates the local files when new data is available.
-
-### How It Works
-
-1. **Daily Check**: GitHub Actions runs at 3 AM UTC every day
-2. **Version Comparison**: Compares latest CMS file with current version in `.last-update`
-3. **Conditional Download**: Only downloads if new version detected
-4. **Selective Extraction**: Downloads 2.5 GB bundle, extracts only 3 needed files (78 MB → 10.6 MB compressed)
-5. **Compression**: Compresses files with gzip (83-96% reduction)
-6. **Automatic Commit**: Commits and pushes updated data if changes detected
-
-### Data Files
-
-The server uses three compressed formulary data files:
-
-- `formulary.txt.gz` (9.5 MB) - 1.1M formulary entries across 332 plans
-- `plans.txt.gz` (485 KB) - 112K plan records with names, states, counties
-- `costs.txt.gz` (632 KB) - 173K cost-sharing records
-
-### Manual Update
-
-To manually trigger a formulary data update:
-
-1. Go to the [Actions tab](https://github.com/openpharma-org/medicare-mcp/actions/workflows/update-formulary.yml) in the repository
-2. Click "Run workflow"
-3. Select the branch (usually `main`)
-4. Click "Run workflow" button
-
-The workflow will check for updates and commit any changes automatically.
-
----
