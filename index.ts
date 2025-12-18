@@ -607,10 +607,9 @@ async function searchPrescribers(
   query.append('size', String(size));
   query.append('offset', String(offset));
 
-  // Add filters
+  // Use keyword search for drug name (searches across all fields, supports partial match)
   if (drug_name) {
-    // Search brand name (most queries use brand name)
-    query.append('filter[Brnd_Name]', drug_name);
+    query.append('keyword', drug_name);
   }
   if (prescriber_npi) {
     query.append('filter[Prscrbr_NPI]', prescriber_npi);
@@ -621,19 +620,15 @@ async function searchPrescribers(
   if (state) {
     query.append('filter[Prscrbr_State_Abrvtn]', state);
   }
-
-  // Add sorting
   if (sort) {
     query.append('sort', `${sort.direction === 'desc' ? '-' : ''}${sort.field}`);
   }
 
   const url = `https://data.cms.gov/data-api/v1/dataset/${datasetId}/data?${query.toString()}`;
-
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`CMS API error: ${response.statusText}`);
   }
-
   const data = await response.json() as any[];
 
   return {
@@ -827,8 +822,8 @@ async function searchFormulary(
   offset: number = 0
 ): Promise<any> {
   // Support both .txt and .txt.gz files
-  const formularyBasePath = path.join(__dirname, 'data', 'formulary', 'formulary.txt');
-  const plansBasePath = path.join(__dirname, 'data', 'formulary', 'plans.txt');
+  const formularyBasePath = path.join(__dirname, '..', 'data', 'formulary', 'formulary.txt');
+  const plansBasePath = path.join(__dirname, '..', 'data', 'formulary', 'plans.txt');
 
   const formularyPath = fs.existsSync(formularyBasePath + '.gz') ? formularyBasePath + '.gz' : formularyBasePath;
   const plansPath = fs.existsSync(plansBasePath + '.gz') ? plansBasePath + '.gz' : plansBasePath;

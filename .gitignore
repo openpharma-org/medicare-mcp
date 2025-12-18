@@ -10,7 +10,6 @@ yarn-error.log
 .env.*.local
 
 # Build output
-dist/
 build/
 
 # IDE and editor files
