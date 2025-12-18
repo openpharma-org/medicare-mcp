@@ -15,6 +15,19 @@ A Model Context Protocol (MCP) server providing comprehensive access to **CMS Me
 - **Unified Tool Interface**: Single `medicare_info` tool with method-based routing for different data types
 - **Automated Updates**: GitHub Actions workflow for daily formulary data checks and updates
 
+## Usage
+
+```json
+{
+  "mcpServers": {
+    "medicare-mcp-server": {
+      "command": "node",
+      "args": ["/path/to/medicare-mcp-server/build/index.js"]
+    }
+  }
+}
+```
+
 ## Tool Description
 
 ### Medicare Info Tool
