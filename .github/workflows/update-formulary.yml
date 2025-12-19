@@ -69,14 +69,25 @@ jobs:
           unzip -q -j "plan information*.zip" -d extracted/
           unzip -q -j "beneficiary cost file*.zip" -d extracted/
 
-          # Move to repo data folder with standard names
-          echo "Moving files to data directory..."
-          mv extracted/basic*.txt $GITHUB_WORKSPACE/data/formulary/formulary.txt
-          mv extracted/plan*.txt $GITHUB_WORKSPACE/data/formulary/plans.txt
-          mv extracted/beneficiary*.txt $GITHUB_WORKSPACE/data/formulary/costs.txt
+          # Extract month identifier from filename (e.g., "2026_20251210.zip" -> "202512")
+          MONTH_ID=$(echo "$LATEST_FILENAME" | grep -oE '202[0-9]{5}' | head -1 || echo "unknown")
+          echo "Month ID: $MONTH_ID"
+
+          # Move to repo data folder with month-based names
+          echo "Moving files to data directory with month-based names..."
+          mkdir -p $GITHUB_WORKSPACE/data/formulary
+          mv extracted/basic*.txt $GITHUB_WORKSPACE/data/formulary/${MONTH_ID}_formulary.txt
+          mv extracted/plan*.txt $GITHUB_WORKSPACE/data/formulary/${MONTH_ID}_plans.txt
+          mv extracted/beneficiary*.txt $GITHUB_WORKSPACE/data/formulary/${MONTH_ID}_costs.txt
+
+          # Also copy to generic names for backward compatibility
+          cp $GITHUB_WORKSPACE/data/formulary/${MONTH_ID}_formulary.txt $GITHUB_WORKSPACE/data/formulary/formulary.txt
+          cp $GITHUB_WORKSPACE/data/formulary/${MONTH_ID}_plans.txt $GITHUB_WORKSPACE/data/formulary/plans.txt
+          cp $GITHUB_WORKSPACE/data/formulary/${MONTH_ID}_costs.txt $GITHUB_WORKSPACE/data/formulary/costs.txt
 
           # Save version info
           echo "$LATEST_FILENAME" > $GITHUB_WORKSPACE/data/formulary/.last-update
+          echo "$MONTH_ID" > $GITHUB_WORKSPACE/data/formulary/.latest-month
 
           echo "Files extracted successfully:"
           ls -lh $GITHUB_WORKSPACE/data/formulary/
@@ -88,13 +99,31 @@ jobs:
       - name: Compress files with gzip (only if update needed)
         if: env.UPDATE_NEEDED == 'true'
         run: |
-          echo "Compressing formulary files..."
+          MONTH_ID=$(cat data/formulary/.latest-month)
+          echo "Compressing formulary files for month: $MONTH_ID..."
+          gzip -f data/formulary/${MONTH_ID}_formulary.txt
+          gzip -f data/formulary/${MONTH_ID}_plans.txt
+          gzip -f data/formulary/${MONTH_ID}_costs.txt
+
+          # Also compress backward-compatible copies
           gzip -f data/formulary/formulary.txt
           gzip -f data/formulary/plans.txt
           gzip -f data/formulary/costs.txt
 
           echo "Compressed files:"
           ls -lh data/formulary/
+
+      - name: Cleanup old months (keep last 12)
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          echo "Cleaning up old formulary data (keeping last 12 months)..."
+          cd data/formulary
+
+          # List all month-based files, sort, keep last 36 files (12 months × 3 files)
+          ls -1 202*_{formulary,plans,costs}.txt.gz 2>/dev/null | sort | head -n -36 | xargs -r rm -f
+
+          echo "Remaining files:"
+          ls -lh 202*.txt.gz 2>/dev/null || echo "No old files to clean"
 
       - name: Commit and push (only if update needed)
         if: env.UPDATE_NEEDED == 'true'
