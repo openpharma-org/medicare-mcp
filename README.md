@@ -10,6 +10,7 @@ A Model Context Protocol (MCP) server providing comprehensive access to **CMS Me
 - **Hospital Quality Metrics**: Star ratings, readmission rates, mortality rates, and hospital-acquired infections (HAI)
 - **Drug Spending**: Medicare Part D and Part B drug spending trends
 - **Formulary Data**: Medicare Part D plan formulary coverage with automated monthly updates
+- **ASP Pricing**: Medicare Part B Average Sales Price data for physician-administered drugs
 - **Flexible Querying**: Advanced filtering, pagination, and field selection
 - **TypeScript**: Fully typed codebase with strict mode enabled
 - **Production Ready**: Health checks and comprehensive logging
@@ -48,6 +49,9 @@ The `medicare_info` tool provides unified access to Medicare data using the `met
 11. **`compare_hospitals`**: Compare multiple hospitals across quality metrics
 12. **`get_vbp_scores`**: Hospital Value-Based Purchasing (VBP) performance scores
 13. **`get_hcahps_scores`**: Patient experience (HCAHPS) survey scores
+14. **`get_asp_pricing`**: Get ASP pricing for Medicare Part B drugs
+15. **`get_asp_trend`**: Track ASP pricing changes over multiple quarters
+16. **`compare_asp_pricing`**: Compare ASP pricing across multiple drugs
 
 ---
 
@@ -1172,8 +1176,176 @@ Get Hospital Consumer Assessment of Healthcare Providers and Systems (HCAHPS) pa
 
 ---
 
+## Method 14: get_asp_pricing
+
+Get Average Sales Price (ASP) pricing for Medicare Part B drugs.
+
+### Parameters
+- **`method`** (required): Must be set to `"get_asp_pricing"`
+- **`hcpcs_code_asp`** (required): HCPCS code for Part B drug (e.g., "J9035" for Bevacizumab)
+- **`quarter`** (optional): Quarter for ASP data (e.g., "2026Q1", "2025Q4"). Defaults to current quarter.
+
+### Response Fields
+- **`hcpcs_code`**: HCPCS billing code
+- **`short_descriptor`**: Drug name/description
+- **`dosage`**: Dosage unit (e.g., "10 MG")
+- **`payment_limit`**: Medicare payment limit (ASP × 1.06)
+- **`asp_calculated`**: Calculated Average Sales Price
+- **`medicare_reimbursement`**: Amount Medicare pays
+- **`patient_coinsurance`**: Patient 20% coinsurance amount
+- **`effective_period`**: Quarter and date range
+- **`quarter`**: Data quarter (YYYYQN format)
+- **`notes`**: Additional CMS notes
+- **`found`**: Boolean indicating if drug was found
+
+### Example Requests
+
+#### 1. Get current ASP for Bevacizumab
+```json
+{
+  "method": "get_asp_pricing",
+  "hcpcs_code_asp": "J9035"
+}
+```
+
+#### 2. Get ASP for specific quarter
+```json
+{
+  "method": "get_asp_pricing",
+  "hcpcs_code_asp": "J0202",
+  "quarter": "2026Q1"
+}
+```
+
+### Use Cases
+
+- **Reimbursement Analysis**: Determine Medicare payment rates for Part B drugs
+- **Patient Cost Estimation**: Calculate patient out-of-pocket costs (20% coinsurance)
+- **Revenue Forecasting**: ASP × expected volume = revenue projections
+- **Price Transparency**: Track Medicare pricing for physician-administered drugs
+
+---
+
+## Method 15: get_asp_trend
+
+Track ASP pricing changes over multiple quarters for trend analysis.
+
+### Parameters
+- **`method`** (required): Must be set to `"get_asp_trend"`
+- **`hcpcs_code_asp`** (required): HCPCS code for Part B drug
+- **`start_quarter`** (required): Starting quarter (e.g., "2025Q1")
+- **`end_quarter`** (required): Ending quarter (e.g., "2026Q1")
+
+### Response Fields
+- **`hcpcs_code`**: HCPCS billing code
+- **`drug_name`**: Drug name from first available quarter
+- **`start_quarter`**: Requested start quarter
+- **`end_quarter`**: Requested end quarter
+- **`data_points`**: Number of quarters with available data
+- **`trend_data`**: Array of quarterly data points with:
+  - `quarter`: Quarter identifier
+  - `payment_limit`: Medicare payment limit
+  - `asp_calculated`: Average Sales Price
+  - `dosage`: Dosage unit
+  - `dates`: Quarter date range
+- **`analysis`**: Statistical analysis:
+  - `min_price`: Lowest price in range
+  - `max_price`: Highest price in range
+  - `avg_price`: Average price across quarters
+  - `price_change_percent`: Percentage change from first to last quarter
+  - `price_volatility`: Price variation as percentage
+
+### Example Requests
+
+#### 1. Track pricing over one year
+```json
+{
+  "method": "get_asp_trend",
+  "hcpcs_code_asp": "J9035",
+  "start_quarter": "2025Q1",
+  "end_quarter": "2026Q1"
+}
+```
+
+#### 2. Long-term trend analysis
+```json
+{
+  "method": "get_asp_trend",
+  "hcpcs_code_asp": "J0202",
+  "start_quarter": "2024Q1",
+  "end_quarter": "2026Q1"
+}
+```
+
+### Use Cases
+
+- **Price Trend Analysis**: Identify drugs with increasing/decreasing prices
+- **Gross-to-Net Modeling**: Track pricing trends for rebate strategy planning
+- **Budget Planning**: Forecast future drug costs based on historical trends
+- **Market Access**: Monitor pricing relative to competitors over time
+
+---
+
+## Method 16: compare_asp_pricing
+
+Compare ASP pricing across multiple drugs for competitive analysis.
+
+### Parameters
+- **`method`** (required): Must be set to `"compare_asp_pricing"`
+- **`hcpcs_codes`** (required): Array of HCPCS codes to compare (e.g., ["J9035", "J9299", "J0202"])
+- **`quarter`** (optional): Quarter for comparison (e.g., "2026Q1"). Defaults to current quarter.
+
+### Response Fields
+- **`quarter`**: Data quarter
+- **`effective_period`**: Quarter date range
+- **`drugs_compared`**: Number of drugs requested
+- **`drugs_found`**: Number of drugs found in data
+- **`comparisons`**: Array of drug data:
+  - `hcpcs_code`: HCPCS billing code
+  - `drug_name`: Drug description
+  - `dosage`: Dosage unit
+  - `payment_limit`: Medicare payment limit
+  - `asp_calculated`: Average Sales Price
+  - `patient_coinsurance`: Patient cost
+  - `notes`: CMS notes
+  - `found`: false if drug not found
+- **`analysis`**: Comparison statistics:
+  - `lowest_price`: Minimum price among drugs
+  - `highest_price`: Maximum price among drugs
+  - `average_price`: Mean price
+  - `price_range`: Price spread (max - min)
+
+### Example Requests
+
+#### 1. Compare oncology drugs
+```json
+{
+  "method": "compare_asp_pricing",
+  "hcpcs_codes": ["J9035", "J9299", "J9310"],
+  "quarter": "2026Q1"
+}
+```
+
+#### 2. Compare biosimilars
+```json
+{
+  "method": "compare_asp_pricing",
+  "hcpcs_codes": ["Q5117", "Q5119", "Q5120"]
+}
+```
+
+### Use Cases
+
+- **Competitive Pricing**: Compare reimbursement rates across competing therapies
+- **Formulary Decisions**: Evaluate cost differences for P&T committee decisions
+- **Biosimilar Analysis**: Compare pricing between reference products and biosimilars
+- **Portfolio Management**: Analyze pricing across drug portfolio
+
+---
+
 ## Data Sources
 
+### Hospital Quality Data
 All hospital quality data comes from CMS Provider Data Catalog (data.cms.gov):
 
 - **Hospital General Information** (xubh-q36u): Star ratings and hospital characteristics
@@ -1184,3 +1356,15 @@ All hospital quality data comes from CMS Provider Data Catalog (data.cms.gov):
 - **Patient Survey HCAHPS** (dgck-syfz): Patient experience scores
 
 Data is updated quarterly by CMS and accessed via public API (no authentication required).
+
+### ASP Pricing Data
+Medicare Part B Average Sales Price (ASP) pricing data:
+
+- **Source**: CMS Medicare Part B ASP Pricing Files
+- **URL**: https://www.cms.gov/medicare/payment/part-b-drugs/asp-pricing-files
+- **Update Frequency**: Quarterly (January, April, July, October)
+- **Current Data**: January 2026 (preliminary)
+- **Format**: CSV files with HCPCS codes, payment limits, and dosage information
+- **Coverage**: Physician-administered drugs (Part B), vaccines, immunizations
+
+ASP data is downloaded quarterly and stored locally in compressed format for fast lookup.

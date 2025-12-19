@@ -1614,53 +1614,277 @@ async function getHcahpsScores(
 }
 
 /**
+ * Helper: Get current quarter in format YYYYQN
+ */
+function getCurrentQuarter(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const quarter = Math.ceil(month / 3);
+  return `${year}Q${quarter}`;
+}
+
+/**
+ * Helper: Parse quarter string to get file path
+ */
+function getAspFilePath(quarter: string): string {
+  const aspBasePath = path.join(__dirname, '..', 'data', 'asp', `${quarter}_ASP_Pricing.csv`);
+  const gzPath = aspBasePath + '.gz';
+
+  if (fs.existsSync(gzPath)) {
+    return gzPath;
+  }
+  if (fs.existsSync(aspBasePath)) {
+    return aspBasePath;
+  }
+
+  throw new Error(`ASP data file not found for quarter ${quarter}. Expected at: ${aspBasePath} or ${gzPath}`);
+}
+
+/**
+ * Helper: Load ASP data for a specific quarter
+ */
+async function loadAspData(quarter: string): Promise<Map<string, any>> {
+  const filePath = getAspFilePath(quarter);
+  const aspData = new Map<string, any>();
+
+  const fileStream = fs.createReadStream(filePath);
+  const dataStream = filePath.endsWith('.gz') ? fileStream.pipe(zlib.createGunzip()) : fileStream;
+  const rl = readline.createInterface({ input: dataStream, crlfDelay: Infinity });
+
+  let isFirstLine = true;
+  for await (const line of rl) {
+    if (isFirstLine) {
+      isFirstLine = false;
+      continue; // Skip header
+    }
+
+    const values = line.split(',');
+    if (values.length < 4) continue;
+
+    const hcpcsCode = values[0]?.trim();
+    const shortDesc = values[1]?.trim().replace(/^"|"$/g, ''); // Remove quotes
+    const dosage = values[2]?.trim();
+    const paymentLimit = parseFloat(values[3]?.trim() || '0');
+    const coinsurancePct = parseFloat(values[4]?.trim() || '20');
+    const notes = values[10]?.trim().replace(/^"|"$/g, '') || '';
+
+    if (hcpcsCode) {
+      aspData.set(hcpcsCode, {
+        hcpcs_code: hcpcsCode,
+        short_descriptor: shortDesc,
+        dosage: dosage,
+        payment_limit: paymentLimit,
+        coinsurance_percentage: coinsurancePct,
+        asp_calculated: paymentLimit / 1.06, // Reverse calculate ASP from payment limit
+        quarter: quarter,
+        notes: notes
+      });
+    }
+  }
+
+  return aspData;
+}
+
+/**
  * Get ASP pricing for Medicare Part B drugs
- * Note: ASP data is published quarterly by CMS. This function would require
- * downloading and parsing ASP pricing files from CMS.
+ * Provides current pricing data for physician-administered drugs
  */
 async function getAspPricing(
   hcpcs_code: string,
   quarter?: string
 ): Promise<any> {
-  // TODO: Implement ASP pricing lookup from downloaded quarterly files
-  // ASP files are available at: https://www.cms.gov/medicare/payment/fee-schedules/physician-fee-schedule-pfs-relative-value-files
+  const targetQuarter = quarter || getCurrentQuarter();
+
+  if (!hcpcs_code) {
+    throw new Error('hcpcs_code parameter is required');
+  }
+
+  const aspData = await loadAspData(targetQuarter);
+  const result = aspData.get(hcpcs_code.toUpperCase());
+
+  if (!result) {
+    return {
+      hcpcs_code: hcpcs_code.toUpperCase(),
+      quarter: targetQuarter,
+      found: false,
+      message: `HCPCS code ${hcpcs_code} not found in ${targetQuarter} ASP data. This code may not be a Part B drug or may not have ASP pricing.`
+    };
+  }
+
   return {
-    message: 'ASP pricing feature coming soon. Requires quarterly ASP file downloads from CMS.',
-    hcpcs_code: hcpcs_code,
-    quarter: quarter,
-    note: 'Will be implemented with local file parsing similar to formulary data'
+    found: true,
+    ...result,
+    medicare_reimbursement: result.payment_limit,
+    patient_coinsurance: (result.payment_limit * result.coinsurance_percentage / 100).toFixed(2),
+    effective_period: `${targetQuarter} (${getQuarterDates(targetQuarter)})`,
+    data_source: 'CMS Medicare Part B ASP Pricing File'
   };
 }
 
 /**
+ * Helper: Get quarter date range
+ */
+function getQuarterDates(quarter: string): string {
+  const [year, q] = quarter.split('Q');
+  const quarters = {
+    '1': `Jan 1 - Mar 31, ${year}`,
+    '2': `Apr 1 - Jun 30, ${year}`,
+    '3': `Jul 1 - Sep 30, ${year}`,
+    '4': `Oct 1 - Dec 31, ${year}`
+  };
+  return quarters[q as keyof typeof quarters] || '';
+}
+
+/**
  * Get ASP pricing trends over time
+ * Tracks how drug pricing changes across multiple quarters
  */
 async function getAspTrend(
   hcpcs_code: string,
   start_quarter: string,
   end_quarter: string
 ): Promise<any> {
-  // TODO: Implement ASP trend analysis from historical data
+  if (!hcpcs_code) {
+    throw new Error('hcpcs_code parameter is required');
+  }
+
+  if (!start_quarter || !end_quarter) {
+    throw new Error('start_quarter and end_quarter parameters are required');
+  }
+
+  const code = hcpcs_code.toUpperCase();
+  const trend: any[] = [];
+  const quarters = generateQuarterRange(start_quarter, end_quarter);
+
+  for (const quarter of quarters) {
+    try {
+      const aspData = await loadAspData(quarter);
+      const result = aspData.get(code);
+
+      if (result) {
+        trend.push({
+          quarter: quarter,
+          payment_limit: result.payment_limit,
+          asp_calculated: result.asp_calculated,
+          dosage: result.dosage,
+          dates: getQuarterDates(quarter)
+        });
+      }
+    } catch (error) {
+      // Quarter data not available, skip
+      logger.warn(`ASP data not available for quarter ${quarter}`);
+    }
+  }
+
+  if (trend.length === 0) {
+    return {
+      hcpcs_code: code,
+      start_quarter,
+      end_quarter,
+      found: false,
+      message: `No ASP data found for ${code} in the specified quarter range`
+    };
+  }
+
+  // Calculate trend statistics
+  const prices = trend.map(t => t.payment_limit);
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+  const priceChange = ((prices[prices.length - 1] - prices[0]) / prices[0] * 100).toFixed(2);
+
   return {
-    message: 'ASP trend feature coming soon. Requires historical ASP data.',
-    hcpcs_code: hcpcs_code,
-    start_quarter: start_quarter,
-    end_quarter: end_quarter
+    hcpcs_code: code,
+    drug_name: trend[0].short_descriptor || 'Unknown',
+    start_quarter,
+    end_quarter,
+    data_points: trend.length,
+    trend_data: trend,
+    analysis: {
+      min_price: minPrice.toFixed(2),
+      max_price: maxPrice.toFixed(2),
+      avg_price: avgPrice.toFixed(2),
+      price_change_percent: priceChange,
+      price_volatility: ((maxPrice - minPrice) / avgPrice * 100).toFixed(2) + '%'
+    }
   };
 }
 
 /**
+ * Helper: Generate array of quarters between start and end
+ */
+function generateQuarterRange(start: string, end: string): string[] {
+  const quarters: string[] = [];
+  const [startYear, startQ] = start.split('Q').map(Number);
+  const [endYear, endQ] = end.split('Q').map(Number);
+
+  for (let year = startYear; year <= endYear; year++) {
+    const firstQ = (year === startYear) ? startQ : 1;
+    const lastQ = (year === endYear) ? endQ : 4;
+
+    for (let q = firstQ; q <= lastQ; q++) {
+      quarters.push(`${year}Q${q}`);
+    }
+  }
+
+  return quarters;
+}
+
+/**
  * Compare ASP pricing across multiple drugs
+ * Useful for competitive pricing analysis
  */
 async function compareAspPricing(
   hcpcs_codes: string[],
   quarter?: string
 ): Promise<any> {
-  // TODO: Implement ASP comparison across drugs
+  if (!hcpcs_codes || hcpcs_codes.length === 0) {
+    throw new Error('hcpcs_codes parameter is required and must be a non-empty array');
+  }
+
+  const targetQuarter = quarter || getCurrentQuarter();
+  const aspData = await loadAspData(targetQuarter);
+  const comparisons: any[] = [];
+
+  for (const code of hcpcs_codes) {
+    const result = aspData.get(code.toUpperCase());
+
+    if (result) {
+      comparisons.push({
+        hcpcs_code: result.hcpcs_code,
+        drug_name: result.short_descriptor,
+        dosage: result.dosage,
+        payment_limit: result.payment_limit,
+        asp_calculated: result.asp_calculated,
+        patient_coinsurance: (result.payment_limit * result.coinsurance_percentage / 100).toFixed(2),
+        notes: result.notes
+      });
+    } else {
+      comparisons.push({
+        hcpcs_code: code.toUpperCase(),
+        found: false,
+        message: 'Not found in ASP data'
+      });
+    }
+  }
+
+  // Calculate comparison stats
+  const found = comparisons.filter(c => c.found !== false);
+  const prices = found.map(c => c.payment_limit);
+
   return {
-    message: 'ASP comparison feature coming soon.',
-    hcpcs_codes: hcpcs_codes,
-    quarter: quarter
+    quarter: targetQuarter,
+    effective_period: getQuarterDates(targetQuarter),
+    drugs_compared: hcpcs_codes.length,
+    drugs_found: found.length,
+    comparisons: comparisons,
+    analysis: found.length > 0 ? {
+      lowest_price: Math.min(...prices).toFixed(2),
+      highest_price: Math.max(...prices).toFixed(2),
+      average_price: (prices.reduce((a, b) => a + b, 0) / prices.length).toFixed(2),
+      price_range: (Math.max(...prices) - Math.min(...prices)).toFixed(2)
+    } : null
   };
 }
 
@@ -2022,9 +2246,3 @@ runServer().catch((error) => {
   logger.error('Server error:', { error: error instanceof Error ? error.message : String(error) });
   process.exit(1);
 });
-
-
-
-
-
-
