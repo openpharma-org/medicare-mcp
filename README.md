@@ -46,6 +46,8 @@ The `medicare_info` tool provides unified access to Medicare data using the `met
 9. **`get_mortality_rates`**: Hospital 30-day mortality rates by condition
 10. **`search_hospitals_by_quality`**: Search hospitals by quality metrics and filters
 11. **`compare_hospitals`**: Compare multiple hospitals across quality metrics
+12. **`get_vbp_scores`**: Hospital Value-Based Purchasing (VBP) performance scores
+13. **`get_hcahps_scores`**: Patient experience (HCAHPS) survey scores
 
 ---
 
@@ -1005,6 +1007,171 @@ Compare multiple hospitals across quality metrics including star ratings, readmi
 
 ---
 
+## Method 12: get_vbp_scores
+
+Get Hospital Value-Based Purchasing (VBP) performance scores from CMS. VBP scores measure hospital performance across four domains: Clinical Outcomes, Person & Community Engagement (patient experience), Safety, and Efficiency/Cost Reduction.
+
+### Parameters
+
+- **`method`** (required): Must be set to `"get_vbp_scores"`
+- **`quality_hospital_id`** (optional): CMS Certification Number (CCN) to lookup specific hospital
+- **`quality_state`** (optional): State abbreviation to filter hospitals
+- **`vbp_domain`** (optional): Filter by VBP domain:
+  - `clinical_outcomes` - Clinical outcomes domain score only
+  - `person_community_engagement` - Patient experience domain score only
+  - `safety` - Safety domain score only
+  - `efficiency_cost_reduction` - Efficiency/cost reduction domain score only
+  - `all` or omit - Return all domain scores (default)
+- **`size`** (optional): Number of results to return (default: 10)
+- **`offset`** (optional): Starting result number for pagination (default: 0)
+
+### Response Format
+
+```json
+{
+  "total": 2,
+  "vbp_scores": [
+    {
+      "facility_id": "050211",
+      "facility_name": "ALAMEDA HOSPITAL",
+      "state": "CA",
+      "fiscal_year": "2025",
+      "total_performance_score": "25.041666666667",
+      "clinical_outcomes_score": "1.666666666667",
+      "person_community_engagement_score": "2.750000000000",
+      "safety_score": "20.625000000000",
+      "efficiency_cost_reduction_score": "0.000000000000"
+    }
+  ]
+}
+```
+
+### Example Queries
+
+#### 1. Get all VBP scores for California hospitals
+```json
+{
+  "method": "get_vbp_scores",
+  "quality_state": "CA",
+  "size": 20
+}
+```
+
+#### 2. Get safety domain scores only
+```json
+{
+  "method": "get_vbp_scores",
+  "quality_state": "CA",
+  "vbp_domain": "safety",
+  "size": 10
+}
+```
+
+#### 3. Get VBP scores for specific hospital
+```json
+{
+  "method": "get_vbp_scores",
+  "quality_hospital_id": "050146"
+}
+```
+
+### Use Cases
+
+- **Payment Adjustment Analysis**: VBP scores directly affect Medicare payments (+/- 2%)
+- **Quality Performance Benchmarking**: Compare hospital performance across quality domains
+- **Value-Based Contracting**: Identify high-performing hospitals for partnerships
+- **Market Analysis**: Analyze quality-based payment adjustments in target markets
+
+---
+
+## Method 13: get_hcahps_scores
+
+Get Hospital Consumer Assessment of Healthcare Providers and Systems (HCAHPS) patient experience scores. HCAHPS is a standardized survey measuring patients' perspectives on hospital care.
+
+### Parameters
+
+- **`method`** (required): Must be set to `"get_hcahps_scores"`
+- **`quality_hospital_id`** (optional): CMS Certification Number (CCN) to lookup specific hospital
+- **`quality_state`** (optional): State abbreviation to filter hospitals
+- **`hcahps_measure`** (optional): Filter by specific HCAHPS measure (e.g., `H_COMP_1_A_P` for nurse communication, `H_HSP_RATING_9_10` for hospital rating 9-10)
+- **`size`** (optional): Number of results to return (default: 10)
+- **`offset`** (optional): Starting result number for pagination (default: 0)
+
+### Response Format
+
+```json
+{
+  "total": 2,
+  "hcahps_scores": [
+    {
+      "facility_id": "050002",
+      "facility_name": "ST ROSE HOSPITAL",
+      "state": "CA",
+      "measure_id": "H_COMP_1_A_P",
+      "measure_question": "Patients who reported that their nurses \"Always\" communicated well",
+      "answer_description": "Nurses \"always\" communicated well",
+      "answer_percent": "71",
+      "star_rating": "Not Applicable",
+      "linear_mean_value": "Not Applicable",
+      "number_of_surveys": "380",
+      "response_rate_percent": "21",
+      "start_date": "01/01/2024",
+      "end_date": "12/31/2024"
+    }
+  ]
+}
+```
+
+### Common HCAHPS Measures
+
+- **`H_COMP_1_A_P`**: Nurses always communicated well
+- **`H_COMP_2_A_P`**: Doctors always communicated well
+- **`H_COMP_3_A_P`**: Staff always explained medicines
+- **`H_COMP_5_A_P`**: Staff always helped with bathroom needs
+- **`H_COMP_6_Y_P`**: Room always kept clean
+- **`H_COMP_7_A_P`**: Area around room always kept quiet at night
+- **`H_HSP_RATING_9_10`**: Hospital rating 9-10 (highest)
+- **`H_RECMND_DY`**: Would definitely recommend hospital
+
+### Example Queries
+
+#### 1. Get all HCAHPS scores for a hospital
+```json
+{
+  "method": "get_hcahps_scores",
+  "quality_hospital_id": "050146",
+  "size": 50
+}
+```
+
+#### 2. Get nurse communication scores for California
+```json
+{
+  "method": "get_hcahps_scores",
+  "quality_state": "CA",
+  "hcahps_measure": "H_COMP_1_A_P",
+  "size": 20
+}
+```
+
+#### 3. Get hospital recommendation rates
+```json
+{
+  "method": "get_hcahps_scores",
+  "quality_state": "NY",
+  "hcahps_measure": "H_RECMND_DY"
+}
+```
+
+### Use Cases
+
+- **Patient Experience Programs**: Identify hospitals with low patient satisfaction for improvement programs
+- **Competitive Analysis**: Compare patient experience scores across competing hospitals
+- **Quality Improvement Targeting**: Focus on specific dimensions (communication, cleanliness, quiet, pain management)
+- **Star Rating Analysis**: HCAHPS scores contribute 25% to overall hospital star rating
+
+---
+
 ## Data Sources
 
 All hospital quality data comes from CMS Provider Data Catalog (data.cms.gov):
@@ -1013,5 +1180,7 @@ All hospital quality data comes from CMS Provider Data Catalog (data.cms.gov):
 - **Unplanned Hospital Visits** (632h-zaca): 30-day readmission rates
 - **Healthcare Associated Infections** (77hc-ibv8): HAI/infection data
 - **Complications and Deaths** (ynj2-r877): 30-day mortality rates
+- **Hospital Value-Based Purchasing** (ypbt-wvdk): VBP performance scores
+- **Patient Survey HCAHPS** (dgck-syfz): Patient experience scores
 
 Data is updated quarterly by CMS and accessed via public API (no authentication required).

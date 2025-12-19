@@ -135,6 +135,8 @@ export const MEDICARE_INFO_TOOL: Tool = {
           "- 'get_mortality_rates': Hospital 30-day mortality rates\n" +
           "- 'search_hospitals_by_quality': Find hospitals by quality metrics\n" +
           "- 'compare_hospitals': Compare quality metrics across hospitals\n" +
+          "- 'get_vbp_scores': Hospital Value-Based Purchasing performance scores\n" +
+          "- 'get_hcahps_scores': Patient experience (HCAHPS) survey scores\n" +
           "- 'get_asp_pricing': Medicare Part B ASP pricing data\n" +
           "- 'get_asp_trend': ASP pricing trends over time\n" +
           "- 'compare_asp_pricing': Compare ASP across drugs"
@@ -301,6 +303,14 @@ export const MEDICARE_INFO_TOOL: Tool = {
       hcpcs_codes: {
         type: "array",
         description: "For compare_asp_pricing: Array of HCPCS codes to compare pricing."
+      },
+      hcahps_measure: {
+        type: "string",
+        description: "For get_hcahps_scores: HCAHPS measure ID to filter by (e.g., 'H_COMP_1_A_P' for nurse communication, 'H_HSP_RATING_9_10' for hospital rating 9-10)."
+      },
+      vbp_domain: {
+        type: "string",
+        description: "For get_vbp_scores: VBP domain to filter by ('clinical_outcomes', 'person_community_engagement', 'safety', 'efficiency_cost_reduction', or 'all' for total performance score)."
       }
     },
     required: ["method"]
@@ -1473,6 +1483,137 @@ async function compareHospitals(
 }
 
 /**
+ * Get Hospital Value-Based Purchasing (VBP) performance scores
+ */
+async function getVbpScores(
+  hospital_id?: string,
+  state?: string,
+  domain?: string,
+  size: number = 10,
+  offset: number = 0
+): Promise<any> {
+  const datasetId = 'ypbt-wvdk'; // Hospital Value-Based Purchasing - Total Performance Score
+
+  const query = new URLSearchParams();
+  query.append('limit', String(size));
+  query.append('offset', String(offset));
+
+  let conditionIndex = 0;
+  if (hospital_id) {
+    query.append(`conditions[${conditionIndex}][property]`, 'facility_id');
+    query.append(`conditions[${conditionIndex}][value]`, hospital_id);
+    conditionIndex++;
+  }
+  if (state) {
+    query.append(`conditions[${conditionIndex}][property]`, 'state');
+    query.append(`conditions[${conditionIndex}][value]`, state);
+    conditionIndex++;
+  }
+
+  const url = `https://data.cms.gov/provider-data/api/1/datastore/query/${datasetId}/0?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`CMS API error: ${response.statusText}`);
+  }
+
+  const responseData = await response.json() as any;
+  const data = Array.isArray(responseData) ? responseData : (responseData.results || []);
+
+  return {
+    total: data.length,
+    vbp_scores: data.map((item: any) => {
+      const result: any = {
+        facility_id: item.facility_id,
+        facility_name: item.facility_name,
+        state: item.state,
+        fiscal_year: item.fiscal_year,
+        total_performance_score: item.total_performance_score
+      };
+
+      // Add domain-specific scores based on filter
+      if (!domain || domain === 'all' || domain === 'clinical_outcomes') {
+        result.clinical_outcomes_score = item.weighted_normalized_clinical_outcomes_domain_score;
+      }
+      if (!domain || domain === 'all' || domain === 'person_community_engagement') {
+        result.person_community_engagement_score = item.weighted_person_and_community_engagement_domain_score;
+      }
+      if (!domain || domain === 'all' || domain === 'safety') {
+        result.safety_score = item.weighted_safety_domain_score;
+      }
+      if (!domain || domain === 'all' || domain === 'efficiency_cost_reduction') {
+        result.efficiency_cost_reduction_score = item.weighted_efficiency_and_cost_reduction_domain_score;
+      }
+
+      return result;
+    })
+  };
+}
+
+/**
+ * Get Hospital Consumer Assessment of Healthcare Providers and Systems (HCAHPS) patient experience scores
+ */
+async function getHcahpsScores(
+  hospital_id?: string,
+  state?: string,
+  measure?: string,
+  size: number = 10,
+  offset: number = 0
+): Promise<any> {
+  const datasetId = 'dgck-syfz'; // Patient survey (HCAHPS) - Hospital
+
+  const query = new URLSearchParams();
+  query.append('limit', String(size));
+  query.append('offset', String(offset));
+
+  let conditionIndex = 0;
+  if (hospital_id) {
+    query.append(`conditions[${conditionIndex}][property]`, 'facility_id');
+    query.append(`conditions[${conditionIndex}][value]`, hospital_id);
+    conditionIndex++;
+  }
+  if (state) {
+    query.append(`conditions[${conditionIndex}][property]`, 'state');
+    query.append(`conditions[${conditionIndex}][value]`, state);
+    conditionIndex++;
+  }
+  if (measure) {
+    query.append(`conditions[${conditionIndex}][property]`, 'hcahps_measure_id');
+    query.append(`conditions[${conditionIndex}][value]`, measure);
+    conditionIndex++;
+  }
+
+  const url = `https://data.cms.gov/provider-data/api/1/datastore/query/${datasetId}/0?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`CMS API error: ${response.statusText}`);
+  }
+
+  const responseData = await response.json() as any;
+  const data = Array.isArray(responseData) ? responseData : (responseData.results || []);
+
+  return {
+    total: data.length,
+    hcahps_scores: data.map((item: any) => ({
+      facility_id: item.facility_id,
+      facility_name: item.facility_name,
+      state: item.state,
+      measure_id: item.hcahps_measure_id,
+      measure_question: item.hcahps_question,
+      answer_description: item.hcahps_answer_description,
+      answer_percent: item.hcahps_answer_percent,
+      star_rating: item.patient_survey_star_rating,
+      linear_mean_value: item.hcahps_linear_mean_value,
+      number_of_surveys: item.number_of_completed_surveys,
+      response_rate_percent: item.survey_response_rate_percent,
+      start_date: item.start_date,
+      end_date: item.end_date
+    }))
+  };
+}
+
+/**
  * Get ASP pricing for Medicare Part B drugs
  * Note: ASP data is published quarterly by CMS. This function would require
  * downloading and parsing ASP pricing files from CMS.
@@ -1697,6 +1838,28 @@ async function runServer() {
                 return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
               }
 
+              case 'get_vbp_scores': {
+                const result = await getVbpScores(
+                  (args as any)?.quality_hospital_id,
+                  (args as any)?.quality_state,
+                  (args as any)?.vbp_domain,
+                  (args as any)?.size,
+                  (args as any)?.offset
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
+              case 'get_hcahps_scores': {
+                const result = await getHcahpsScores(
+                  (args as any)?.quality_hospital_id,
+                  (args as any)?.quality_state,
+                  (args as any)?.hcahps_measure,
+                  (args as any)?.size,
+                  (args as any)?.offset
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
               case 'get_asp_pricing': {
                 const result = await getAspPricing(
                   (args as any)?.hcpcs_code_asp,
@@ -1723,7 +1886,7 @@ async function runServer() {
               }
 
               default:
-                throw new McpError(-32602, `Unknown method: ${method}. Valid methods: search_providers, search_prescribers, search_hospitals, search_spending, search_formulary, get_hospital_star_rating, get_readmission_rates, get_hospital_infections, get_mortality_rates, search_hospitals_by_quality, compare_hospitals, get_asp_pricing, get_asp_trend, compare_asp_pricing`);
+                throw new McpError(-32602, `Unknown method: ${method}. Valid methods: search_providers, search_prescribers, search_hospitals, search_spending, search_formulary, get_hospital_star_rating, get_readmission_rates, get_hospital_infections, get_mortality_rates, search_hospitals_by_quality, compare_hospitals, get_vbp_scores, get_hcahps_scores, get_asp_pricing, get_asp_trend, compare_asp_pricing`);
             }
           }
           default:
@@ -1815,6 +1978,12 @@ async function runServer() {
                 break;
               case 'compare_hospitals':
                 result = await compareHospitals(data.hospital_ids, data.metrics, data.size);
+                break;
+              case 'get_vbp_scores':
+                result = await getVbpScores(data.quality_hospital_id, data.quality_state, data.vbp_domain, data.size, data.offset);
+                break;
+              case 'get_hcahps_scores':
+                result = await getHcahpsScores(data.quality_hospital_id, data.quality_state, data.hcahps_measure, data.size, data.offset);
                 break;
               case 'get_asp_pricing':
                 result = await getAspPricing(data.hcpcs_code_asp, data.quarter);
