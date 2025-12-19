@@ -6,12 +6,14 @@
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "strict": true,
-    "outDir": "build",
+    "rootDir": "./src",
+    "outDir": "./build",
     "sourceMap": true,
     "declaration": true,
-    "typeRoots": ["./node_modules/@types", "./types"],
+    "declarationMap": true,
+    "typeRoots": ["./node_modules/@types"],
     "skipLibCheck": true
   },
-  "include": ["*.ts"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "build"]
 }
