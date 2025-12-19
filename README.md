@@ -7,11 +7,12 @@ A Model Context Protocol (MCP) server providing comprehensive access to **CMS Me
 - **Provider Data**: CMS Medicare Physician & Other Practitioners data from 2013-2023 with automatic latest-year selection
 - **Prescriber Data**: Medicare Part D prescriber information by drug, provider, and geography
 - **Hospital Data**: Medicare inpatient hospital utilization and payment data
+- **Hospital Quality Metrics**: Star ratings, readmission rates, mortality rates, and hospital-acquired infections (HAI)
 - **Drug Spending**: Medicare Part D and Part B drug spending trends
 - **Formulary Data**: Medicare Part D plan formulary coverage with automated monthly updates
 - **Flexible Querying**: Advanced filtering, pagination, and field selection
 - **TypeScript**: Fully typed codebase with strict mode enabled
-- **Production Ready**: Docker support, health checks, and comprehensive logging
+- **Production Ready**: Health checks and comprehensive logging
 - **Unified Tool Interface**: Single `medicare_info` tool with method-based routing for different data types
 - **Automated Updates**: GitHub Actions workflow for daily formulary data checks and updates
 
@@ -39,6 +40,12 @@ The `medicare_info` tool provides unified access to Medicare data using the `met
 3. **`search_hospitals`**: Medicare inpatient hospital utilization and payment data
 4. **`search_spending`**: Medicare Part D and Part B drug spending trends
 5. **`search_formulary`**: Medicare Part D plan formulary coverage (tier, prior auth, quantity limits, step therapy)
+6. **`get_hospital_star_rating`**: Hospital overall quality star ratings (1-5 stars)
+7. **`get_readmission_rates`**: Hospital 30-day readmission rates by condition
+8. **`get_hospital_infections`**: Hospital-acquired infections (HAI) data
+9. **`get_mortality_rates`**: Hospital 30-day mortality rates by condition
+10. **`search_hospitals_by_quality`**: Search hospitals by quality metrics and filters
+11. **`compare_hospitals`**: Compare multiple hospitals across quality metrics
 
 ---
 
@@ -568,3 +575,443 @@ Search Medicare Part D plan formulary coverage using local CMS formulary data fi
   "tier": 5
 }
 ```
+
+---
+
+## Method 6: get_hospital_star_rating
+
+Get hospital overall quality star ratings (1-5 stars) from CMS Hospital Care Compare. Star ratings provide a comprehensive measure of hospital quality based on multiple clinical domains including mortality, safety, readmission, patient experience, and timely & effective care.
+
+### Parameters
+
+- **`method`** (required): Must be set to `"get_hospital_star_rating"`
+- **`quality_hospital_id`** (optional): CMS Certification Number (CCN) to lookup specific hospital (e.g., '050146')
+- **`quality_state`** (optional): State abbreviation to filter hospitals (e.g., 'CA', 'TX', 'NY')
+- **`size`** (optional): Number of results to return (default: 10)
+- **`offset`** (optional): Starting result number for pagination (default: 0)
+
+### Response Format
+
+```json
+{
+  "total": 2,
+  "hospitals": [
+    {
+      "facility_id": "050002",
+      "facility_name": "ST ROSE HOSPITAL",
+      "address": "27200 CALAROGA AVE",
+      "city": "HAYWARD",
+      "state": "CA",
+      "zip_code": "94545",
+      "hospital_overall_rating": "1",
+      "hospital_type": "Acute Care Hospitals",
+      "hospital_ownership": "Voluntary non-profit - Church",
+      "emergency_services": false,
+      "mortality_measures_count": "7",
+      "safety_measures_count": "8",
+      "readmission_measures_count": "11",
+      "patient_experience_measures_count": "8"
+    }
+  ]
+}
+```
+
+### Example Queries
+
+#### 1. Get star ratings for California hospitals
+```json
+{
+  "method": "get_hospital_star_rating",
+  "quality_state": "CA",
+  "size": 10
+}
+```
+
+#### 2. Lookup specific hospital by CCN
+```json
+{
+  "method": "get_hospital_star_rating",
+  "quality_hospital_id": "050146"
+}
+```
+
+### Use Cases
+
+- **Provider Network Selection**: Identify high-quality hospitals (4-5 stars) for preferred networks
+- **Quality Benchmarking**: Compare hospital performance against competitors
+- **Market Analysis**: Analyze quality distribution across geographic markets
+- **Contracting Strategy**: Target high-performing hospitals for value-based contracts
+
+---
+
+## Method 7: get_readmission_rates
+
+Get hospital 30-day readmission rates by medical condition from CMS Unplanned Hospital Visits dataset. Readmission rates indicate how often patients return to the hospital within 30 days of discharge.
+
+### Parameters
+
+- **`method`** (required): Must be set to `"get_readmission_rates"`
+- **`quality_hospital_id`** (optional): CMS Certification Number (CCN) to lookup specific hospital
+- **`quality_state`** (optional): State abbreviation to filter hospitals
+- **`condition`** (optional): Medical condition to filter by:
+  - `heart_attack` - Heart attack (AMI) 30-day readmission
+  - `heart_failure` - Heart failure 30-day readmission
+  - `pneumonia` - Pneumonia 30-day readmission
+  - `copd` - COPD 30-day readmission
+  - `cabg` - CABG surgery 30-day readmission
+  - `hip_knee` - Hip/knee replacement 30-day readmission
+- **`size`** (optional): Number of results to return (default: 10)
+- **`offset`** (optional): Starting result number for pagination (default: 0)
+
+### Response Format
+
+```json
+{
+  "total": 2,
+  "readmissions": [
+    {
+      "facility_id": "050002",
+      "facility_name": "ST ROSE HOSPITAL",
+      "state": "CA",
+      "measure_id": "EDAC_30_HF",
+      "measure_name": "Hospital return days for heart failure patients",
+      "compared_to_national": "More Days Than Average per 100 Discharges",
+      "score": "29.4",
+      "denominator": "135",
+      "lower_estimate": "9.4",
+      "higher_estimate": "51.4",
+      "number_of_patients": "103",
+      "number_of_patients_returned": "43",
+      "start_date": "07/01/2021",
+      "end_date": "06/30/2024"
+    }
+  ]
+}
+```
+
+### Example Queries
+
+#### 1. Get heart failure readmissions in California
+```json
+{
+  "method": "get_readmission_rates",
+  "quality_state": "CA",
+  "condition": "heart_failure",
+  "size": 20
+}
+```
+
+#### 2. Get all readmission measures for a specific hospital
+```json
+{
+  "method": "get_readmission_rates",
+  "quality_hospital_id": "050146",
+  "size": 50
+}
+```
+
+### Use Cases
+
+- **Drug Market Sizing**: Identify hospitals with high HF readmissions for heart failure drug targeting
+- **Value-Based Contracting**: Partner with hospitals to reduce readmissions through better medication management
+- **Quality Improvement Programs**: Target hospitals with high readmission rates for clinical support programs
+- **Competitive Intelligence**: Analyze readmission patterns to identify unmet medical needs
+
+---
+
+## Method 8: get_hospital_infections
+
+Get hospital-acquired infection (HAI) data including CLABSI, CAUTI, SSI, C.diff, and MRSA from CMS Healthcare Associated Infections dataset. Returns Standardized Infection Ratios (SIR) comparing observed vs. predicted infections.
+
+### Parameters
+
+- **`method`** (required): Must be set to `"get_hospital_infections"`
+- **`quality_hospital_id`** (optional): CMS Certification Number (CCN) to lookup specific hospital
+- **`quality_state`** (optional): State abbreviation to filter hospitals
+- **`infection_type`** (optional): Type of infection to filter by:
+  - `CLABSI` - Central Line Associated Bloodstream Infection
+  - `CAUTI` - Catheter-Associated Urinary Tract Infection
+  - `SSI` - Surgical Site Infection
+  - `CDIFF` - Clostridium Difficile Infection
+  - `MRSA` - Methicillin-Resistant Staphylococcus Aureus
+- **`size`** (optional): Number of results to return (default: 10)
+- **`offset`** (optional): Starting result number for pagination (default: 0)
+
+### Response Format
+
+```json
+{
+  "total": 2,
+  "infections": [
+    {
+      "facility_id": "050002",
+      "facility_name": "ST ROSE HOSPITAL",
+      "state": "CA",
+      "measure_id": "HAI_1_SIR",
+      "measure_name": "Central Line Associated Bloodstream Infection (ICU + select Wards)",
+      "compared_to_national": "No Different than National Benchmark",
+      "score": "0.000",
+      "start_date": "01/01/2024",
+      "end_date": "12/31/2024"
+    }
+  ]
+}
+```
+
+### Example Queries
+
+#### 1. Get CLABSI data for California hospitals
+```json
+{
+  "method": "get_hospital_infections",
+  "quality_state": "CA",
+  "infection_type": "CLABSI",
+  "size": 20
+}
+```
+
+#### 2. Get all HAI data for a specific hospital
+```json
+{
+  "method": "get_hospital_infections",
+  "quality_hospital_id": "050146"
+}
+```
+
+### Use Cases
+
+- **Antibiotic Market Targeting**: Identify hospitals with high infection rates for antimicrobial stewardship programs
+- **Infection Control Budget Analysis**: Estimate hospital spending on infection prevention
+- **Quality Improvement Partnerships**: Partner with high-infection hospitals for clinical programs
+- **Device Market Sizing**: Analyze infection burden for medical device targeting (central lines, catheters)
+
+---
+
+## Method 9: get_mortality_rates
+
+Get hospital 30-day mortality rates by medical condition from CMS Complications and Deaths dataset. Mortality rates show risk-adjusted death rates within 30 days of hospital admission.
+
+### Parameters
+
+- **`method`** (required): Must be set to `"get_mortality_rates"`
+- **`quality_hospital_id`** (optional): CMS Certification Number (CCN) to lookup specific hospital
+- **`quality_state`** (optional): State abbreviation to filter hospitals
+- **`condition`** (optional): Medical condition to filter by:
+  - `heart_attack` - Heart attack (AMI) 30-day mortality
+  - `heart_failure` - Heart failure 30-day mortality
+  - `pneumonia` - Pneumonia 30-day mortality
+  - `cabg` - CABG surgery 30-day mortality
+  - `copd` - COPD 30-day mortality
+  - `stroke` - Stroke 30-day mortality
+- **`size`** (optional): Number of results to return (default: 10)
+- **`offset`** (optional): Starting result number for pagination (default: 0)
+
+### Response Format
+
+```json
+{
+  "total": 5,
+  "mortality": [
+    {
+      "facility_id": "050146",
+      "facility_name": "CEDARS-SINAI MEDICAL CENTER",
+      "state": "CA",
+      "measure_id": "MORT_30_AMI",
+      "measure_name": "Acute Myocardial Infarction (AMI) 30-Day Mortality Rate",
+      "compared_to_national": "No Different than National Rate",
+      "score": "13.8",
+      "denominator": "450",
+      "lower_estimate": "11.2",
+      "higher_estimate": "16.8",
+      "start_date": "07/01/2020",
+      "end_date": "06/30/2023"
+    }
+  ]
+}
+```
+
+### Example Queries
+
+#### 1. Get heart attack mortality rates in California
+```json
+{
+  "method": "get_mortality_rates",
+  "quality_state": "CA",
+  "condition": "heart_attack",
+  "size": 20
+}
+```
+
+#### 2. Get all mortality measures for a hospital
+```json
+{
+  "method": "get_mortality_rates",
+  "quality_hospital_id": "050146"
+}
+```
+
+### Use Cases
+
+- **Outcomes-Based Contracting**: Identify hospitals with better mortality outcomes for partnerships
+- **Clinical Trial Site Selection**: Select high-quality hospitals for better patient outcomes
+- **Drug Efficacy Targeting**: Target hospitals with high mortality for drugs that improve survival
+- **Quality Benchmarking**: Compare hospital performance on life-threatening conditions
+
+---
+
+## Method 10: search_hospitals_by_quality
+
+Search and filter hospitals by quality metrics including minimum star ratings and geographic filters.
+
+### Parameters
+
+- **`method`** (required): Must be set to `"search_hospitals_by_quality"`
+- **`quality_state`** (optional): State abbreviation to filter hospitals
+- **`min_star_rating`** (optional): Minimum star rating (1-5) to filter hospitals
+- **`size`** (optional): Number of results to return (default: 10)
+- **`offset`** (optional): Starting result number for pagination (default: 0)
+
+### Response Format
+
+```json
+{
+  "total": 5,
+  "hospitals": [
+    {
+      "facility_id": "050146",
+      "facility_name": "CEDARS-SINAI MEDICAL CENTER",
+      "address": "8700 BEVERLY BLVD",
+      "city": "LOS ANGELES",
+      "state": "CA",
+      "zip_code": "90048",
+      "hospital_overall_rating": "5",
+      "hospital_type": "Acute Care Hospitals",
+      "hospital_ownership": "Voluntary non-profit - Private",
+      "emergency_services": true
+    }
+  ]
+}
+```
+
+### Example Queries
+
+#### 1. Find 4-5 star hospitals in California
+```json
+{
+  "method": "search_hospitals_by_quality",
+  "quality_state": "CA",
+  "min_star_rating": 4,
+  "size": 50
+}
+```
+
+#### 2. Find all 5-star hospitals nationwide
+```json
+{
+  "method": "search_hospitals_by_quality",
+  "min_star_rating": 5,
+  "size": 100
+}
+```
+
+### Use Cases
+
+- **Network Development**: Build preferred provider networks with high-quality hospitals
+- **Market Entry Strategy**: Identify top-performing hospitals for initial launch partnerships
+- **Geographic Expansion**: Find quality hospitals in new markets
+- **Competitive Analysis**: Analyze quality distribution in target markets
+
+---
+
+## Method 11: compare_hospitals
+
+Compare multiple hospitals across quality metrics including star ratings, readmission rates, mortality rates, and infection rates.
+
+### Parameters
+
+- **`method`** (required): Must be set to `"compare_hospitals"`
+- **`hospital_ids`** (required): Array of hospital CCN IDs to compare
+- **`metrics`** (optional): Array of metrics to compare. Options:
+  - `star_rating` - Overall quality star rating
+  - `readmission_rate` - 30-day readmission rates
+  - `mortality_rate` - 30-day mortality rates
+  - `infection_rate` - Hospital-acquired infection rates
+  - If not specified, returns all metrics
+- **`size`** (optional): Number of results per metric (default: 100)
+
+### Response Format
+
+```json
+{
+  "hospitals": [
+    {
+      "facility_id": "050146",
+      "facility_name": "CEDARS-SINAI MEDICAL CENTER",
+      "star_rating": "5",
+      "readmissions": [
+        {
+          "measure_id": "READM_30_HF",
+          "measure_name": "Heart failure 30-day readmission",
+          "score": "21.2",
+          "compared_to_national": "Better than National Rate"
+        }
+      ],
+      "mortality": [
+        {
+          "measure_id": "MORT_30_AMI",
+          "measure_name": "Heart attack 30-day mortality",
+          "score": "13.8",
+          "compared_to_national": "No Different than National Rate"
+        }
+      ],
+      "infections": [
+        {
+          "measure_id": "HAI_1_SIR",
+          "measure_name": "CLABSI",
+          "score": "0.326",
+          "compared_to_national": "No Different than National Benchmark"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Example Queries
+
+#### 1. Compare three hospitals across all metrics
+```json
+{
+  "method": "compare_hospitals",
+  "hospital_ids": ["050146", "050660", "050116"]
+}
+```
+
+#### 2. Compare hospitals on star rating and readmissions only
+```json
+{
+  "method": "compare_hospitals",
+  "hospital_ids": ["050146", "050660"],
+  "metrics": ["star_rating", "readmission_rate"]
+}
+```
+
+### Use Cases
+
+- **Contracting Decisions**: Compare quality metrics before finalizing hospital contracts
+- **Competitive Benchmarking**: Analyze how target hospitals compare to competitors
+- **Market Analysis**: Compare quality across hospitals in same geographic market
+- **Performance Tracking**: Monitor quality changes over time for partner hospitals
+
+---
+
+## Data Sources
+
+All hospital quality data comes from CMS Provider Data Catalog (data.cms.gov):
+
+- **Hospital General Information** (xubh-q36u): Star ratings and hospital characteristics
+- **Unplanned Hospital Visits** (632h-zaca): 30-day readmission rates
+- **Healthcare Associated Infections** (77hc-ibv8): HAI/infection data
+- **Complications and Deaths** (ynj2-r877): 30-day mortality rates
+
+Data is updated quarterly by CMS and accessed via public API (no authentication required).

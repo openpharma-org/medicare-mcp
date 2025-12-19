@@ -117,13 +117,27 @@ function getLatestYear(versionMap: { [year: string]: string }): string {
 
 export const MEDICARE_INFO_TOOL: Tool = {
   name: "medicare_info",
-  description: "Unified tool for Medicare data operations: provider services, Part D prescribers, hospital data, and spending information. Use the method parameter to specify the operation type.",
+  description: "Unified tool for Medicare data operations: provider services, Part D prescribers, hospital data, spending information, hospital quality metrics, and ASP pricing. Use the method parameter to specify the operation type.",
   input_schema: {
     type: "object",
     properties: {
       method: {
         type: "string",
-        description: "The operation to perform: search_providers (Medicare Physician & Other Practitioners data), search_prescribers (Part D prescriber data), search_hospitals (hospital utilization & quality data), or search_spending (drug/service spending data). Valid values: 'search_providers', 'search_prescribers', 'search_hospitals', 'search_spending'"
+        description: "The operation to perform:\n" +
+          "- 'search_providers': Medicare Physician & Other Practitioners data\n" +
+          "- 'search_prescribers': Part D prescriber data\n" +
+          "- 'search_hospitals': Hospital utilization data\n" +
+          "- 'search_spending': Drug/service spending data\n" +
+          "- 'search_formulary': Part D formulary coverage\n" +
+          "- 'get_hospital_star_rating': Hospital overall quality star ratings (1-5)\n" +
+          "- 'get_readmission_rates': Hospital 30-day readmission rates by condition\n" +
+          "- 'get_hospital_infections': Hospital-acquired infections (HAI) data\n" +
+          "- 'get_mortality_rates': Hospital 30-day mortality rates\n" +
+          "- 'search_hospitals_by_quality': Find hospitals by quality metrics\n" +
+          "- 'compare_hospitals': Compare quality metrics across hospitals\n" +
+          "- 'get_asp_pricing': Medicare Part B ASP pricing data\n" +
+          "- 'get_asp_trend': ASP pricing trends over time\n" +
+          "- 'compare_asp_pricing': Compare ASP across drugs"
       },
       dataset_type: {
         type: "string",
@@ -239,6 +253,54 @@ export const MEDICARE_INFO_TOOL: Tool = {
       plan_id: {
         type: "string",
         description: "For search_formulary: Medicare Part D plan ID to filter by specific plan."
+      },
+      quality_hospital_id: {
+        type: "string",
+        description: "For hospital quality methods: CMS Certification Number (CCN) to lookup specific hospital (e.g., '050146')."
+      },
+      quality_state: {
+        type: "string",
+        description: "For hospital quality methods: State abbreviation to filter hospitals (e.g., 'CA', 'TX', 'NY')."
+      },
+      min_star_rating: {
+        type: "number",
+        description: "For search_hospitals_by_quality: Minimum star rating (1-5) to filter hospitals."
+      },
+      condition: {
+        type: "string",
+        description: "For get_readmission_rates/get_mortality_rates: Medical condition to filter by (e.g., 'heart_failure', 'pneumonia', 'heart_attack', 'copd', 'stroke')."
+      },
+      infection_type: {
+        type: "string",
+        description: "For get_hospital_infections: Type of infection (e.g., 'CLABSI', 'CAUTI', 'SSI', 'CDIFF', 'MRSA')."
+      },
+      metrics: {
+        type: "array",
+        description: "For compare_hospitals: Array of metrics to compare (e.g., ['star_rating', 'readmission_rate', 'mortality_rate', 'infection_rate'])."
+      },
+      hospital_ids: {
+        type: "array",
+        description: "For compare_hospitals: Array of hospital CCN IDs to compare."
+      },
+      hcpcs_code_asp: {
+        type: "string",
+        description: "For ASP pricing methods: HCPCS code for Part B drug (e.g., 'J9035' for Bevacizumab)."
+      },
+      quarter: {
+        type: "string",
+        description: "For get_asp_pricing: Quarter for ASP data (e.g., '2025Q1', '2024Q4')."
+      },
+      start_quarter: {
+        type: "string",
+        description: "For get_asp_trend: Starting quarter for trend analysis (e.g., '2023Q1')."
+      },
+      end_quarter: {
+        type: "string",
+        description: "For get_asp_trend: Ending quarter for trend analysis (e.g., '2025Q1')."
+      },
+      hcpcs_codes: {
+        type: "array",
+        description: "For compare_asp_pricing: Array of HCPCS codes to compare pricing."
       }
     },
     required: ["method"]
@@ -1017,6 +1079,450 @@ async function searchFormulary(
   };
 }
 
+/**
+ * Get hospital star ratings from CMS Hospital General Information dataset
+ */
+async function getHospitalStarRating(
+  hospital_id?: string,
+  state?: string,
+  size: number = 10,
+  offset: number = 0
+): Promise<any> {
+  const datasetId = 'xubh-q36u'; // Hospital General Information
+
+  const query = new URLSearchParams();
+  query.append('limit', String(size));
+  query.append('offset', String(offset));
+
+  let conditionIndex = 0;
+  if (hospital_id) {
+    query.append(`conditions[${conditionIndex}][property]`, 'facility_id');
+    query.append(`conditions[${conditionIndex}][value]`, hospital_id);
+    conditionIndex++;
+  }
+  if (state) {
+    query.append(`conditions[${conditionIndex}][property]`, 'state');
+    query.append(`conditions[${conditionIndex}][value]`, state);
+    conditionIndex++;
+  }
+
+  const url = `https://data.cms.gov/provider-data/api/1/datastore/query/${datasetId}/0?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`CMS API error: ${response.statusText}`);
+  }
+
+  const responseData = await response.json() as any;
+  const data = Array.isArray(responseData) ? responseData : (responseData.results || []);
+
+  return {
+    total: data.length,
+    hospitals: data.map((item: any) => ({
+      facility_id: item.facility_id,
+      facility_name: item.facility_name,
+      address: item.address,
+      city: item.citytown,
+      state: item.state,
+      zip_code: item.zip_code,
+      hospital_overall_rating: item.hospital_overall_rating,
+      hospital_type: item.hospital_type,
+      hospital_ownership: item.hospital_ownership,
+      emergency_services: item.emergency_services === 'Yes',
+      mortality_measures_count: item.mort_group_measure_count,
+      safety_measures_count: item.safety_group_measure_count,
+      readmission_measures_count: item.readm_group_measure_count,
+      patient_experience_measures_count: item.pt_exp_group_measure_count
+    }))
+  };
+}
+
+/**
+ * Get hospital readmission rates from CMS Unplanned Hospital Visits dataset
+ */
+async function getReadmissionRates(
+  hospital_id?: string,
+  state?: string,
+  condition?: string,
+  size: number = 10,
+  offset: number = 0
+): Promise<any> {
+  const datasetId = '632h-zaca'; // Unplanned Hospital Visits - Hospital
+
+  const query = new URLSearchParams();
+  query.append('limit', String(size));
+  query.append('offset', String(offset));
+
+  let conditionIndex = 0;
+  if (hospital_id) {
+    query.append(`conditions[${conditionIndex}][property]`, 'facility_id');
+    query.append(`conditions[${conditionIndex}][value]`, hospital_id);
+    conditionIndex++;
+  }
+  if (state) {
+    query.append(`conditions[${conditionIndex}][property]`, 'state');
+    query.append(`conditions[${conditionIndex}][value]`, state);
+    conditionIndex++;
+  }
+
+  // Map condition names to measure IDs
+  if (condition) {
+    const conditionMap: { [key: string]: string } = {
+      'heart_attack': 'READM_30_AMI',
+      'heart_failure': 'READM_30_HF',
+      'pneumonia': 'READM_30_PN',
+      'copd': 'READM_30_COPD',
+      'cabg': 'READM_30_CABG',
+      'hip_knee': 'READM_30_HIP_KNEE'
+    };
+    const measureId = conditionMap[condition.toLowerCase()];
+    if (measureId) {
+      query.append(`conditions[${conditionIndex}][property]`, 'measure_id');
+      query.append(`conditions[${conditionIndex}][value]`, measureId);
+      conditionIndex++;
+    }
+  }
+
+  const url = `https://data.cms.gov/provider-data/api/1/datastore/query/${datasetId}/0?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`CMS API error: ${response.statusText}`);
+  }
+
+  const responseData = await response.json() as any;
+  const data = Array.isArray(responseData) ? responseData : (responseData.results || []);
+
+  return {
+    total: data.length,
+    readmissions: data.map((item: any) => ({
+      facility_id: item.facility_id,
+      facility_name: item.facility_name,
+      state: item.state,
+      measure_id: item.measure_id,
+      measure_name: item.measure_name,
+      compared_to_national: item.compared_to_national,
+      score: item.score,
+      denominator: item.denominator,
+      lower_estimate: item.lower_estimate,
+      higher_estimate: item.higher_estimate,
+      number_of_patients: item.number_of_patients,
+      number_of_patients_returned: item.number_of_patients_returned,
+      start_date: item.start_date,
+      end_date: item.end_date
+    }))
+  };
+}
+
+/**
+ * Get hospital-acquired infections (HAI) data
+ */
+async function getHospitalInfections(
+  hospital_id?: string,
+  state?: string,
+  infection_type?: string,
+  size: number = 10,
+  offset: number = 0
+): Promise<any> {
+  const datasetId = '77hc-ibv8'; // Healthcare Associated Infections - Hospital
+
+  const query = new URLSearchParams();
+  query.append('limit', String(size));
+  query.append('offset', String(offset));
+
+  let conditionIndex = 0;
+  if (hospital_id) {
+    query.append(`conditions[${conditionIndex}][property]`, 'facility_id');
+    query.append(`conditions[${conditionIndex}][value]`, hospital_id);
+    conditionIndex++;
+  }
+  if (state) {
+    query.append(`conditions[${conditionIndex}][property]`, 'state');
+    query.append(`conditions[${conditionIndex}][value]`, state);
+    conditionIndex++;
+  }
+
+  // Map infection type to measure ID
+  if (infection_type) {
+    const infectionMap: { [key: string]: string } = {
+      'CLABSI': 'HAI_1_SIR',
+      'CAUTI': 'HAI_2_SIR',
+      'SSI': 'HAI_3_SIR',
+      'CDIFF': 'HAI_6_SIR',
+      'MRSA': 'HAI_5_SIR'
+    };
+    const measureId = infectionMap[infection_type.toUpperCase()];
+    if (measureId) {
+      query.append(`conditions[${conditionIndex}][property]`, 'measure_id');
+      query.append(`conditions[${conditionIndex}][value]`, measureId);
+      conditionIndex++;
+    }
+  }
+
+  const url = `https://data.cms.gov/provider-data/api/1/datastore/query/${datasetId}/0?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`CMS API error: ${response.statusText}`);
+  }
+
+  const responseData = await response.json() as any;
+  const data = Array.isArray(responseData) ? responseData : (responseData.results || []);
+
+  return {
+    total: data.length,
+    infections: data.map((item: any) => ({
+      facility_id: item.facility_id,
+      facility_name: item.facility_name,
+      state: item.state,
+      measure_id: item.measure_id,
+      measure_name: item.measure_name,
+      compared_to_national: item.compared_to_national,
+      score: item.score, // SIR - Standardized Infection Ratio
+      start_date: item.start_date,
+      end_date: item.end_date
+    }))
+  };
+}
+
+/**
+ * Get hospital mortality rates
+ */
+async function getMortalityRates(
+  hospital_id?: string,
+  state?: string,
+  condition?: string,
+  size: number = 10,
+  offset: number = 0
+): Promise<any> {
+  const datasetId = 'ynj2-r877'; // Complications and Deaths - Hospital
+
+  const query = new URLSearchParams();
+  query.append('limit', String(size));
+  query.append('offset', String(offset));
+
+  let conditionIndex = 0;
+  if (hospital_id) {
+    query.append(`conditions[${conditionIndex}][property]`, 'facility_id');
+    query.append(`conditions[${conditionIndex}][value]`, hospital_id);
+    conditionIndex++;
+  }
+  if (state) {
+    query.append(`conditions[${conditionIndex}][property]`, 'state');
+    query.append(`conditions[${conditionIndex}][value]`, state);
+    conditionIndex++;
+  }
+
+  // Map condition names to measure IDs
+  if (condition) {
+    const conditionMap: { [key: string]: string } = {
+      'heart_attack': 'MORT_30_AMI',
+      'heart_failure': 'MORT_30_HF',
+      'pneumonia': 'MORT_30_PN',
+      'cabg': 'MORT_30_CABG',
+      'copd': 'MORT_30_COPD',
+      'stroke': 'MORT_30_STK'
+    };
+    const measureId = conditionMap[condition.toLowerCase()];
+    if (measureId) {
+      query.append(`conditions[${conditionIndex}][property]`, 'measure_id');
+      query.append(`conditions[${conditionIndex}][value]`, measureId);
+      conditionIndex++;
+    }
+  }
+
+  const url = `https://data.cms.gov/provider-data/api/1/datastore/query/${datasetId}/0?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`CMS API error: ${response.statusText}`);
+  }
+
+  const responseData = await response.json() as any;
+  const data = Array.isArray(responseData) ? responseData : (responseData.results || []);
+
+  return {
+    total: data.length,
+    mortality: data.map((item: any) => ({
+      facility_id: item.facility_id,
+      facility_name: item.facility_name,
+      state: item.state,
+      measure_id: item.measure_id,
+      measure_name: item.measure_name,
+      compared_to_national: item.compared_to_national,
+      score: item.score,
+      denominator: item.denominator,
+      lower_estimate: item.lower_estimate,
+      higher_estimate: item.higher_estimate,
+      start_date: item.start_date,
+      end_date: item.end_date
+    }))
+  };
+}
+
+/**
+ * Search hospitals by quality metrics
+ */
+async function searchHospitalsByQuality(
+  state?: string,
+  min_star_rating?: number,
+  size: number = 10,
+  offset: number = 0
+): Promise<any> {
+  const datasetId = 'xubh-q36u'; // Hospital General Information
+
+  const query = new URLSearchParams();
+  query.append('limit', String(size));
+  query.append('offset', String(offset));
+
+  let conditionIndex = 0;
+  if (state) {
+    query.append(`conditions[${conditionIndex}][property]`, 'state');
+    query.append(`conditions[${conditionIndex}][value]`, state);
+    conditionIndex++;
+  }
+
+  const url = `https://data.cms.gov/provider-data/api/1/datastore/query/${datasetId}/0?${query.toString()}`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`CMS API error: ${response.statusText}`);
+  }
+
+  const responseData = await response.json() as any;
+  let data = Array.isArray(responseData) ? responseData : (responseData.results || []);
+
+  // Filter by min_star_rating if provided (client-side filter since API doesn't support >= operations)
+  if (min_star_rating) {
+    data = data.filter((item: any) => {
+      const rating = parseInt(item.hospital_overall_rating);
+      return !isNaN(rating) && rating >= min_star_rating;
+    });
+  }
+
+  return {
+    total: data.length,
+    hospitals: data.map((item: any) => ({
+      facility_id: item.facility_id,
+      facility_name: item.facility_name,
+      address: item.address,
+      city: item.citytown,
+      state: item.state,
+      zip_code: item.zip_code,
+      hospital_overall_rating: item.hospital_overall_rating,
+      hospital_type: item.hospital_type,
+      hospital_ownership: item.hospital_ownership,
+      emergency_services: item.emergency_services === 'Yes'
+    }))
+  };
+}
+
+/**
+ * Compare hospitals across multiple quality metrics
+ */
+async function compareHospitals(
+  hospital_ids: string[],
+  metrics?: string[],
+  size: number = 100
+): Promise<any> {
+  if (!hospital_ids || hospital_ids.length === 0) {
+    throw new Error('hospital_ids array is required');
+  }
+
+  const results: any = {
+    hospitals: []
+  };
+
+  // Fetch data for each hospital
+  for (const hospitalId of hospital_ids) {
+    const hospitalData: any = {
+      facility_id: hospitalId
+    };
+
+    // Get star rating if requested
+    if (!metrics || metrics.includes('star_rating')) {
+      const starData = await getHospitalStarRating(hospitalId, undefined, 1, 0);
+      if (starData.hospitals.length > 0) {
+        hospitalData.facility_name = starData.hospitals[0].facility_name;
+        hospitalData.star_rating = starData.hospitals[0].hospital_overall_rating;
+      }
+    }
+
+    // Get readmission rates if requested
+    if (!metrics || metrics.includes('readmission_rate')) {
+      const readmissionData = await getReadmissionRates(hospitalId, undefined, undefined, 10, 0);
+      hospitalData.readmissions = readmissionData.readmissions;
+    }
+
+    // Get mortality rates if requested
+    if (!metrics || metrics.includes('mortality_rate')) {
+      const mortalityData = await getMortalityRates(hospitalId, undefined, undefined, 10, 0);
+      hospitalData.mortality = mortalityData.mortality;
+    }
+
+    // Get infection rates if requested
+    if (!metrics || metrics.includes('infection_rate')) {
+      const infectionData = await getHospitalInfections(hospitalId, undefined, undefined, 10, 0);
+      hospitalData.infections = infectionData.infections;
+    }
+
+    results.hospitals.push(hospitalData);
+  }
+
+  return results;
+}
+
+/**
+ * Get ASP pricing for Medicare Part B drugs
+ * Note: ASP data is published quarterly by CMS. This function would require
+ * downloading and parsing ASP pricing files from CMS.
+ */
+async function getAspPricing(
+  hcpcs_code: string,
+  quarter?: string
+): Promise<any> {
+  // TODO: Implement ASP pricing lookup from downloaded quarterly files
+  // ASP files are available at: https://www.cms.gov/medicare/payment/fee-schedules/physician-fee-schedule-pfs-relative-value-files
+  return {
+    message: 'ASP pricing feature coming soon. Requires quarterly ASP file downloads from CMS.',
+    hcpcs_code: hcpcs_code,
+    quarter: quarter,
+    note: 'Will be implemented with local file parsing similar to formulary data'
+  };
+}
+
+/**
+ * Get ASP pricing trends over time
+ */
+async function getAspTrend(
+  hcpcs_code: string,
+  start_quarter: string,
+  end_quarter: string
+): Promise<any> {
+  // TODO: Implement ASP trend analysis from historical data
+  return {
+    message: 'ASP trend feature coming soon. Requires historical ASP data.',
+    hcpcs_code: hcpcs_code,
+    start_quarter: start_quarter,
+    end_quarter: end_quarter
+  };
+}
+
+/**
+ * Compare ASP pricing across multiple drugs
+ */
+async function compareAspPricing(
+  hcpcs_codes: string[],
+  quarter?: string
+): Promise<any> {
+  // TODO: Implement ASP comparison across drugs
+  return {
+    message: 'ASP comparison feature coming soon.',
+    hcpcs_codes: hcpcs_codes,
+    quarter: quarter
+  };
+}
+
 
 function sendError(res: http.ServerResponse, message: string, code: number = 400) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
@@ -1129,8 +1635,95 @@ async function runServer() {
                 return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
               }
 
+              case 'get_hospital_star_rating': {
+                const result = await getHospitalStarRating(
+                  (args as any)?.quality_hospital_id,
+                  (args as any)?.quality_state,
+                  (args as any)?.size,
+                  (args as any)?.offset
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
+              case 'get_readmission_rates': {
+                const result = await getReadmissionRates(
+                  (args as any)?.quality_hospital_id,
+                  (args as any)?.quality_state,
+                  (args as any)?.condition,
+                  (args as any)?.size,
+                  (args as any)?.offset
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
+              case 'get_hospital_infections': {
+                const result = await getHospitalInfections(
+                  (args as any)?.quality_hospital_id,
+                  (args as any)?.quality_state,
+                  (args as any)?.infection_type,
+                  (args as any)?.size,
+                  (args as any)?.offset
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
+              case 'get_mortality_rates': {
+                const result = await getMortalityRates(
+                  (args as any)?.quality_hospital_id,
+                  (args as any)?.quality_state,
+                  (args as any)?.condition,
+                  (args as any)?.size,
+                  (args as any)?.offset
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
+              case 'search_hospitals_by_quality': {
+                const result = await searchHospitalsByQuality(
+                  (args as any)?.quality_state,
+                  (args as any)?.min_star_rating,
+                  (args as any)?.size,
+                  (args as any)?.offset
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
+              case 'compare_hospitals': {
+                const result = await compareHospitals(
+                  (args as any)?.hospital_ids,
+                  (args as any)?.metrics,
+                  (args as any)?.size
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
+              case 'get_asp_pricing': {
+                const result = await getAspPricing(
+                  (args as any)?.hcpcs_code_asp,
+                  (args as any)?.quarter
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
+              case 'get_asp_trend': {
+                const result = await getAspTrend(
+                  (args as any)?.hcpcs_code_asp,
+                  (args as any)?.start_quarter,
+                  (args as any)?.end_quarter
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
+              case 'compare_asp_pricing': {
+                const result = await compareAspPricing(
+                  (args as any)?.hcpcs_codes,
+                  (args as any)?.quarter
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
               default:
-                throw new McpError(-32602, `Unknown method: ${method}. Valid methods: search_providers, search_prescribers, search_hospitals, search_spending, search_formulary`);
+                throw new McpError(-32602, `Unknown method: ${method}. Valid methods: search_providers, search_prescribers, search_hospitals, search_spending, search_formulary, get_hospital_star_rating, get_readmission_rates, get_hospital_infections, get_mortality_rates, search_hospitals_by_quality, compare_hospitals, get_asp_pricing, get_asp_trend, compare_asp_pricing`);
             }
           }
           default:
@@ -1204,6 +1797,33 @@ async function runServer() {
                 break;
               case 'search_formulary':
                 result = await searchFormulary(data.formulary_drug_name, data.ndc_code, data.tier, data.requires_prior_auth, data.has_quantity_limit, data.has_step_therapy, data.plan_state, data.plan_id, data.size, data.offset);
+                break;
+              case 'get_hospital_star_rating':
+                result = await getHospitalStarRating(data.quality_hospital_id, data.quality_state, data.size, data.offset);
+                break;
+              case 'get_readmission_rates':
+                result = await getReadmissionRates(data.quality_hospital_id, data.quality_state, data.condition, data.size, data.offset);
+                break;
+              case 'get_hospital_infections':
+                result = await getHospitalInfections(data.quality_hospital_id, data.quality_state, data.infection_type, data.size, data.offset);
+                break;
+              case 'get_mortality_rates':
+                result = await getMortalityRates(data.quality_hospital_id, data.quality_state, data.condition, data.size, data.offset);
+                break;
+              case 'search_hospitals_by_quality':
+                result = await searchHospitalsByQuality(data.quality_state, data.min_star_rating, data.size, data.offset);
+                break;
+              case 'compare_hospitals':
+                result = await compareHospitals(data.hospital_ids, data.metrics, data.size);
+                break;
+              case 'get_asp_pricing':
+                result = await getAspPricing(data.hcpcs_code_asp, data.quarter);
+                break;
+              case 'get_asp_trend':
+                result = await getAspTrend(data.hcpcs_code_asp, data.start_quarter, data.end_quarter);
+                break;
+              case 'compare_asp_pricing':
+                result = await compareAspPricing(data.hcpcs_codes, data.quarter);
                 break;
               default:
                 sendError(res, `Unknown method: ${methodName}`, 400);
