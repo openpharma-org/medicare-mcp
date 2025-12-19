@@ -1,0 +1,149 @@
+name: Update ASP Pricing Data
+
+on:
+  schedule:
+    - cron: '0 6 15 1,4,7,10 *'  # Run on 15th of Jan, Apr, Jul, Oct at 6 AM UTC (after quarter releases)
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch latest ASP pricing file from CMS
+        id: fetch-url
+        run: |
+          echo "Fetching latest ASP pricing file list from CMS..."
+
+          # Fetch the ASP pricing page HTML
+          ASP_PAGE=$(curl -s "https://www.cms.gov/medicare/payment/part-b-drugs/asp-pricing-files")
+
+          # Extract the most recent ZIP file URL (looks for "202X-medicare-part-b-payment-limit-files.zip")
+          LATEST_URL=$(echo "$ASP_PAGE" | grep -oP 'https://www\.cms\.gov/files/zip/[a-z]+-20[0-9]{2}-medicare-part-b-payment-limit-files?\.zip' | head -1)
+
+          if [ -z "$LATEST_URL" ]; then
+            echo "ERROR: Could not find ASP pricing file URL"
+            exit 1
+          fi
+
+          echo "Latest URL: $LATEST_URL"
+          echo "LATEST_URL=$LATEST_URL" >> $GITHUB_ENV
+
+          # Extract quarter from filename (e.g., "january-2026" -> "2026Q1")
+          FILENAME=$(basename "$LATEST_URL")
+          MONTH=$(echo "$FILENAME" | grep -oP '(january|april|july|october)' | tr '[:upper:]' '[:lower:]')
+          YEAR=$(echo "$FILENAME" | grep -oP '20[0-9]{2}')
+
+          case "$MONTH" in
+            january) QUARTER="Q1" ;;
+            april) QUARTER="Q2" ;;
+            july) QUARTER="Q3" ;;
+            october) QUARTER="Q4" ;;
+            *) echo "ERROR: Unknown month $MONTH"; exit 1 ;;
+          esac
+
+          QUARTER_ID="${YEAR}${QUARTER}"
+          echo "QUARTER_ID=$QUARTER_ID" >> $GITHUB_ENV
+          echo "Detected quarter: $QUARTER_ID"
+
+      - name: Check if update needed
+        id: check-update
+        run: |
+          # Create metadata file if it doesn't exist
+          mkdir -p data/asp
+          touch data/asp/.last-update
+
+          CURRENT_VERSION=$(cat data/asp/.last-update || echo "none")
+          echo "Current version: $CURRENT_VERSION"
+          echo "Latest version: $QUARTER_ID"
+
+          if [ "$CURRENT_VERSION" = "$QUARTER_ID" ]; then
+            echo "No update needed - already have latest quarter"
+            echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
+          else
+            echo "Update needed - new quarter available"
+            echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
+          fi
+
+      - name: Download and extract ASP data (only if update needed)
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          echo "Downloading ASP pricing file from: $LATEST_URL"
+          wget -q --show-progress -O /tmp/asp.zip "$LATEST_URL"
+
+          echo "Extracting ZIP file..."
+          cd /tmp
+          unzip -q asp.zip
+
+          # Find the CSV file (Section 508 accessible version)
+          CSV_FILE=$(find /tmp -name "*.csv" -type f | head -1)
+
+          if [ -z "$CSV_FILE" ]; then
+            echo "ERROR: No CSV file found in ZIP"
+            exit 1
+          fi
+
+          echo "Found CSV file: $CSV_FILE"
+
+          # Remove header rows (first 8 lines) and save to data directory
+          tail -n +9 "$CSV_FILE" > /tmp/asp_clean.csv
+
+          # Move to repository with quarter-based filename
+          OUTPUT_FILE="$GITHUB_WORKSPACE/data/asp/${QUARTER_ID}_ASP_Pricing.csv"
+          mv /tmp/asp_clean.csv "$OUTPUT_FILE"
+
+          echo "CSV file saved to: $OUTPUT_FILE"
+
+          # Count number of drugs
+          DRUG_COUNT=$(wc -l < "$OUTPUT_FILE")
+          echo "Number of drugs in file: $((DRUG_COUNT - 1))"  # -1 for header
+
+          # Update version tracker
+          echo "$QUARTER_ID" > $GITHUB_WORKSPACE/data/asp/.last-update
+
+          # Cleanup temp files
+          rm -rf /tmp/asp.zip /tmp/*.xls /tmp/*.csv
+
+      - name: Compress file with gzip (only if update needed)
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          echo "Compressing ASP pricing file..."
+          gzip -f data/asp/${QUARTER_ID}_ASP_Pricing.csv
+
+          echo "Compressed file:"
+          ls -lh data/asp/${QUARTER_ID}_ASP_Pricing.csv.gz
+
+          echo "ASP data directory:"
+          ls -lh data/asp/
+
+      - name: Commit and push (only if update needed)
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add data/asp/
+          git commit -m "Update ASP pricing data to $QUARTER_ID
+
+          Source: CMS Medicare Part B ASP Pricing Files
+          Quarter: $QUARTER_ID
+          Date: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+
+          🤖 Automated update via GitHub Actions"
+
+          git push
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ "$UPDATE_NEEDED" = "true" ]; then
+            echo "✅ ASP pricing data updated successfully"
+            echo "New quarter: $QUARTER_ID"
+            echo "File: data/asp/${QUARTER_ID}_ASP_Pricing.csv.gz"
+          else
+            echo "ℹ️  No update needed - already have latest quarter"
+            echo "Current quarter: $(cat data/asp/.last-update)"
+          fi

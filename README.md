@@ -15,7 +15,9 @@ A Model Context Protocol (MCP) server providing comprehensive access to **CMS Me
 - **TypeScript**: Fully typed codebase with strict mode enabled
 - **Production Ready**: Health checks and comprehensive logging
 - **Unified Tool Interface**: Single `medicare_info` tool with method-based routing for different data types
-- **Automated Updates**: GitHub Actions workflow for daily formulary data checks and updates
+- **Automated Updates**: GitHub Actions workflows for data freshness
+  - Formulary: Monthly checks on the 15th (after CMS releases)
+  - ASP Pricing: Quarterly checks on 15th of Jan/Apr/Jul/Oct
 
 ## Usage
 
@@ -1366,5 +1368,7 @@ Medicare Part B Average Sales Price (ASP) pricing data:
 - **Current Data**: January 2026 (preliminary)
 - **Format**: CSV files with HCPCS codes, payment limits, and dosage information
 - **Coverage**: Physician-administered drugs (Part B), vaccines, immunizations
+- **Automation**: GitHub Actions workflow checks for new quarters monthly
+- **Storage**: `data/asp/{QUARTER}_ASP_Pricing.csv.gz` (dynamic quarter-based filenames)
 
-ASP data is downloaded quarterly and stored locally in compressed format for fast lookup.
+ASP data is automatically downloaded, cleaned, compressed, and committed when new quarters are released.

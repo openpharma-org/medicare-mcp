@@ -2,7 +2,7 @@ name: Update Formulary Data
 
 on:
   schedule:
-    - cron: '0 3 * * *'  # Run daily at 3 AM UTC
+    - cron: '0 3 15 * *'  # Run monthly on the 15th at 3 AM UTC (after CMS releases)
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
