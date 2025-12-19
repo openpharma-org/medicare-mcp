@@ -54,6 +54,7 @@ The `medicare_info` tool provides unified access to Medicare data using the `met
 14. **`get_asp_pricing`**: Get ASP pricing for Medicare Part B drugs
 15. **`get_asp_trend`**: Track ASP pricing changes over multiple quarters
 16. **`compare_asp_pricing`**: Compare ASP pricing across multiple drugs
+17. **`get_formulary_trend`**: Track formulary policy changes over time (prior auth, tiers, coverage)
 
 ---
 
@@ -1342,6 +1343,126 @@ Compare ASP pricing across multiple drugs for competitive analysis.
 - **Formulary Decisions**: Evaluate cost differences for P&T committee decisions
 - **Biosimilar Analysis**: Compare pricing between reference products and biosimilars
 - **Portfolio Management**: Analyze pricing across drug portfolio
+
+---
+
+## Method 17: get_formulary_trend
+
+Track formulary policy changes over time to identify market access trends.
+
+### Parameters
+- **`method`** (required): Must be set to `"get_formulary_trend"`
+- **`start_month`** (required): Starting month in YYYYMM format (e.g., "202401")
+- **`end_month`** (required): Ending month in YYYYMM format (e.g., "202512")
+- **`drug_name`** (optional): Drug name to search (e.g., "Metformin")
+- **`rxcui`** (optional): RxNorm Concept Unique Identifier
+- **`trend_metric`** (optional): Specific metric to track ("prior_auth", "tier", "quantity_limit", "coverage", or "all"). Default: "all"
+
+### Response Fields
+- **`drug_name`**: Name of drug analyzed
+- **`rxcui`**: RxNorm identifier
+- **`start_month`** / **`end_month`**: Analysis period
+- **`data_points`**: Number of months with data
+- **`trend_data`**: Monthly statistics array:
+  - `month`: Month identifier (YYYYMM)
+  - `month_label`: Human-readable format (YYYY-MM)
+  - `total_plans`: Total number of plans evaluated
+  - `plans_with_coverage`: Plans covering this drug
+  - `coverage_rate`: Percentage of plans with coverage (0-1)
+  - `prior_auth_rate`: Percentage requiring prior authorization (0-1)
+  - `quantity_limit_rate`: Percentage with quantity limits (0-1)
+  - `avg_tier`: Average formulary tier placement
+- **`analysis`**: Trend analysis:
+  - `coverage_change`: Change in coverage rate (%)
+  - `prior_auth_change`: Change in prior auth requirements (%)
+  - `quantity_limit_change`: Change in quantity limits (%)
+  - `avg_tier_change`: Change in average tier
+  - `overall_assessment`: AI assessment ("Access improving", "Access deteriorating", "Access stable")
+
+### Example Requests
+
+#### 1. Track prior authorization trends over 12 months
+```json
+{
+  "method": "get_formulary_trend",
+  "start_month": "202401",
+  "end_month": "202512",
+  "drug_name": "Metformin"
+}
+```
+
+#### 2. Monitor tier changes for specific drug
+```json
+{
+  "method": "get_formulary_trend",
+  "start_month": "202501",
+  "end_month": "202512",
+  "rxcui": "6809",
+  "trend_metric": "tier"
+}
+```
+
+#### 3. Track market access deterioration
+```json
+{
+  "method": "get_formulary_trend",
+  "start_month": "202401",
+  "end_month": "202512",
+  "drug_name": "Ozempic"
+}
+```
+
+### Example Response
+
+```json
+{
+  "drug_name": "Metformin",
+  "rxcui": "6809",
+  "start_month": "202401",
+  "end_month": "202512",
+  "data_points": 12,
+  "trend_data": [
+    {
+      "month": "202401",
+      "month_label": "2024-01",
+      "total_plans": 3245,
+      "plans_with_coverage": 3120,
+      "coverage_rate": 0.961,
+      "prior_auth_rate": 0.023,
+      "quantity_limit_rate": 0.185,
+      "avg_tier": 1.2
+    },
+    // ... 10 more months
+    {
+      "month": "202512",
+      "month_label": "2025-12",
+      "total_plans": 3289,
+      "plans_with_coverage": 3145,
+      "coverage_rate": 0.956,
+      "prior_auth_rate": 0.038,
+      "quantity_limit_rate": 0.221,
+      "avg_tier": 1.3
+    }
+  ],
+  "analysis": {
+    "coverage_change": "-0.50%",
+    "prior_auth_change": "+1.50%",
+    "quantity_limit_change": "+3.60%",
+    "avg_tier_change": "+0.10",
+    "overall_assessment": "Access deteriorating - increased restrictions"
+  }
+}
+```
+
+### Use Cases
+
+- **Market Access Monitoring**: Track if your drug is getting harder to access over time
+- **Competitive Intelligence**: Compare access trends across competing drugs
+- **P&T Strategy**: Identify when formulary restrictions are tightening
+- **Budget Impact**: Prior auth increases = higher administrative costs
+- **Patient Access Programs**: Detect when patients may need more support
+- **Pricing Negotiations**: Use access deterioration as leverage in rebate discussions
+- **Early Warning System**: Catch restrictive trends before they impact sales
 
 ---
 
