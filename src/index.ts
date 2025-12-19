@@ -139,7 +139,8 @@ export const MEDICARE_INFO_TOOL: Tool = {
           "- 'get_hcahps_scores': Patient experience (HCAHPS) survey scores\n" +
           "- 'get_asp_pricing': Medicare Part B ASP pricing data\n" +
           "- 'get_asp_trend': ASP pricing trends over time\n" +
-          "- 'compare_asp_pricing': Compare ASP across drugs"
+          "- 'compare_asp_pricing': Compare ASP across drugs\n" +
+          "- 'get_formulary_trend': Track formulary changes over time (prior auth, tiers, coverage)"
       },
       dataset_type: {
         type: "string",
@@ -311,6 +312,18 @@ export const MEDICARE_INFO_TOOL: Tool = {
       vbp_domain: {
         type: "string",
         description: "For get_vbp_scores: VBP domain to filter by ('clinical_outcomes', 'person_community_engagement', 'safety', 'efficiency_cost_reduction', or 'all' for total performance score)."
+      },
+      start_month: {
+        type: "string",
+        description: "For get_formulary_trend: Starting month in YYYYMM format (e.g., '202401' for January 2024)."
+      },
+      end_month: {
+        type: "string",
+        description: "For get_formulary_trend: Ending month in YYYYMM format (e.g., '202512' for December 2025)."
+      },
+      trend_metric: {
+        type: "string",
+        description: "For get_formulary_trend: Metric to track ('prior_auth', 'tier', 'quantity_limit', 'coverage', or 'all'). Default: 'all'."
       }
     },
     required: ["method"]
@@ -1888,6 +1901,217 @@ async function compareAspPricing(
   };
 }
 
+/**
+ * Helper: Generate array of months between start and end
+ */
+function generateMonthRange(start: string, end: string): string[] {
+  const months: string[] = [];
+  const startYear = parseInt(start.substring(0, 4));
+  const startMonth = parseInt(start.substring(4, 6));
+  const endYear = parseInt(end.substring(0, 4));
+  const endMonth = parseInt(end.substring(4, 6));
+
+  for (let year = startYear; year <= endYear; year++) {
+    const firstMonth = (year === startYear) ? startMonth : 1;
+    const lastMonth = (year === endYear) ? endMonth : 12;
+
+    for (let month = firstMonth; month <= lastMonth; month++) {
+      months.push(`${year}${month.toString().padStart(2, '0')}`);
+    }
+  }
+
+  return months;
+}
+
+/**
+ * Helper: Load formulary data for a specific month
+ */
+async function loadFormularyMonth(month: string, drug_name?: string, rxcui?: string): Promise<Map<string, any>> {
+  const formularyBasePath = path.join(__dirname, '..', 'data', 'formulary', `${month}_formulary.txt`);
+  const gzPath = formularyBasePath + '.gz';
+
+  let filePath: string;
+  if (fs.existsSync(gzPath)) {
+    filePath = gzPath;
+  } else if (fs.existsSync(formularyBasePath)) {
+    filePath = formularyBasePath;
+  } else {
+    throw new Error(`Formulary data not found for month ${month}`);
+  }
+
+  // If drug_name provided, lookup RXCUI first
+  let targetRxcuis: string[] = rxcui ? [rxcui] : [];
+  if (drug_name && !rxcui) {
+    try {
+      const rxnormUrl = `https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(drug_name)}`;
+      const rxnormResponse = await fetch(rxnormUrl);
+      const rxnormData = await rxnormResponse.json() as any;
+
+      if (rxnormData.drugGroup?.conceptGroup) {
+        for (const group of rxnormData.drugGroup.conceptGroup) {
+          if (group.conceptProperties) {
+            targetRxcuis = group.conceptProperties.map((prop: any) => prop.rxcui);
+            break;
+          }
+        }
+      }
+    } catch (error) {
+      logger.warn(`RxNorm lookup failed for ${drug_name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (targetRxcuis.length === 0 && !rxcui) {
+    throw new Error(`No RXCUI found for drug: ${drug_name}`);
+  }
+
+  // Aggregate formulary data by plan
+  const fileStream = fs.createReadStream(filePath);
+  const dataStream = filePath.endsWith('.gz') ? fileStream.pipe(zlib.createGunzip()) : fileStream;
+  const rl = readline.createInterface({ input: dataStream, crlfDelay: Infinity });
+
+  const stats = {
+    total_plans: new Set<string>(),
+    plans_with_coverage: new Set<string>(),
+    prior_auth_plans: new Set<string>(),
+    quantity_limit_plans: new Set<string>(),
+    tiers: [] as number[]
+  };
+
+  let lineNum = 0;
+  for await (const line of rl) {
+    lineNum++;
+    if (lineNum === 1) continue; // Skip header
+
+    const values = line.split('|');
+    const formularyId = values[0];
+    const lineRxcui = values[3];
+    const tierValue = parseInt(values[5] || '0');
+    const quantityLimitYN = values[6];
+    const priorAuthYN = values[9];
+
+    // Filter by RXCUI
+    if (targetRxcuis.length > 0 && !targetRxcuis.includes(lineRxcui)) {
+      continue;
+    }
+
+    stats.total_plans.add(formularyId);
+    stats.plans_with_coverage.add(formularyId);
+
+    if (priorAuthYN === 'Y') {
+      stats.prior_auth_plans.add(formularyId);
+    }
+
+    if (quantityLimitYN === 'Y') {
+      stats.quantity_limit_plans.add(formularyId);
+    }
+
+    if (tierValue > 0) {
+      stats.tiers.push(tierValue);
+    }
+  }
+
+  const result = new Map<string, any>();
+  result.set('stats', {
+    total_plans: stats.total_plans.size,
+    plans_with_coverage: stats.plans_with_coverage.size,
+    coverage_rate: stats.plans_with_coverage.size / (stats.total_plans.size || 1),
+    prior_auth_rate: stats.prior_auth_plans.size / (stats.plans_with_coverage.size || 1),
+    quantity_limit_rate: stats.quantity_limit_plans.size / (stats.plans_with_coverage.size || 1),
+    avg_tier: stats.tiers.length > 0 ? stats.tiers.reduce((a, b) => a + b, 0) / stats.tiers.length : 0
+  });
+
+  return result;
+}
+
+/**
+ * Get formulary trend analysis over time
+ * Tracks how formulary policies change across multiple months
+ */
+async function getFormularyTrend(
+  start_month: string,
+  end_month: string,
+  drug_name?: string,
+  rxcui?: string,
+  trend_metric?: string
+): Promise<any> {
+  const metric = trend_metric || 'all';
+  if (!drug_name && !rxcui) {
+    throw new Error('Either drug_name or rxcui parameter is required');
+  }
+
+  if (!start_month || !end_month) {
+    throw new Error('start_month and end_month parameters are required');
+  }
+
+  const months = generateMonthRange(start_month, end_month);
+  const trendData: any[] = [];
+
+  for (const month of months) {
+    try {
+      const data = await loadFormularyMonth(month, drug_name, rxcui);
+      const stats = data.get('stats');
+
+      if (stats) {
+        trendData.push({
+          month: month,
+          month_label: `${month.substring(0, 4)}-${month.substring(4, 6)}`,
+          ...stats
+        });
+      }
+    } catch (error) {
+      // Month data not available, skip
+      logger.warn(`Formulary data not available for month ${month}`);
+    }
+  }
+
+  if (trendData.length === 0) {
+    return {
+      drug_name: drug_name || rxcui,
+      start_month,
+      end_month,
+      found: false,
+      message: `No formulary data found for the specified month range`
+    };
+  }
+
+  // Calculate trend analysis
+  const first = trendData[0];
+  const last = trendData[trendData.length - 1];
+
+  return {
+    drug_name: drug_name || rxcui,
+    rxcui: rxcui,
+    start_month,
+    end_month,
+    data_points: trendData.length,
+    trend_data: trendData,
+    analysis: {
+      coverage_change: ((last.coverage_rate - first.coverage_rate) * 100).toFixed(2) + '%',
+      prior_auth_change: ((last.prior_auth_rate - first.prior_auth_rate) * 100).toFixed(2) + '%',
+      quantity_limit_change: ((last.quantity_limit_rate - first.quantity_limit_rate) * 100).toFixed(2) + '%',
+      avg_tier_change: (last.avg_tier - first.avg_tier).toFixed(2),
+      overall_assessment: assessFormularyTrend(first, last)
+    }
+  };
+}
+
+/**
+ * Helper: Assess overall formulary trend
+ */
+function assessFormularyTrend(first: any, last: any): string {
+  const priorAuthIncrease = last.prior_auth_rate - first.prior_auth_rate;
+  const tierIncrease = last.avg_tier - first.avg_tier;
+  const coverageDecrease = first.coverage_rate - last.coverage_rate;
+
+  if (priorAuthIncrease > 0.1 || tierIncrease > 0.5 || coverageDecrease > 0.05) {
+    return "Access deteriorating - increased restrictions";
+  } else if (priorAuthIncrease < -0.05 || tierIncrease < -0.3) {
+    return "Access improving - reduced restrictions";
+  } else {
+    return "Access stable - minimal changes";
+  }
+}
+
 
 function sendError(res: http.ServerResponse, message: string, code: number = 400) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
@@ -2109,8 +2333,19 @@ async function runServer() {
                 return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
               }
 
+              case 'get_formulary_trend': {
+                const result = await getFormularyTrend(
+                  (args as any)?.start_month,
+                  (args as any)?.end_month,
+                  (args as any)?.drug_name,
+                  (args as any)?.rxcui,
+                  (args as any)?.trend_metric
+                );
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
+              }
+
               default:
-                throw new McpError(-32602, `Unknown method: ${method}. Valid methods: search_providers, search_prescribers, search_hospitals, search_spending, search_formulary, get_hospital_star_rating, get_readmission_rates, get_hospital_infections, get_mortality_rates, search_hospitals_by_quality, compare_hospitals, get_vbp_scores, get_hcahps_scores, get_asp_pricing, get_asp_trend, compare_asp_pricing`);
+                throw new McpError(-32602, `Unknown method: ${method}. Valid methods: search_providers, search_prescribers, search_hospitals, search_spending, search_formulary, get_hospital_star_rating, get_readmission_rates, get_hospital_infections, get_mortality_rates, search_hospitals_by_quality, compare_hospitals, get_vbp_scores, get_hcahps_scores, get_asp_pricing, get_asp_trend, compare_asp_pricing, get_formulary_trend`);
             }
           }
           default:
@@ -2217,6 +2452,9 @@ async function runServer() {
                 break;
               case 'compare_asp_pricing':
                 result = await compareAspPricing(data.hcpcs_codes, data.quarter);
+                break;
+              case 'get_formulary_trend':
+                result = await getFormularyTrend(data.start_month, data.end_month, data.drug_name, data.rxcui, data.trend_metric);
                 break;
               default:
                 sendError(res, `Unknown method: ${methodName}`, 400);
