@@ -191,7 +191,11 @@ export const MEDICARE_INFO_TOOL: Tool = {
       },
       drug_name: {
         type: "string",
-        description: "For search_prescribers: Drug name to search for - brand or generic (e.g., 'semaglutide', 'Ozempic', 'metformin'). Searches both brand and generic names."
+        description: "For search_prescribers: Drug name to search for - brand or generic (e.g., 'semaglutide', 'Ozempic', 'metformin'). Searches both brand and generic names. Note: When include_demographics=true, drug_name filter is not available (uses aggregated provider-level data)."
+      },
+      include_demographics: {
+        type: "boolean",
+        description: "For search_prescribers: Include patient demographic breakdowns (age bands, gender, race, dual-eligible status). When true, uses provider-level aggregated data which doesn't support drug_name filtering. Default: false."
       },
       prescriber_type: {
         type: "string",
@@ -684,20 +688,34 @@ async function searchPrescribers(
   state?: string,
   size: number = 10,
   offset: number = 0,
-  sort?: { field: string; direction: 'asc' | 'desc' }
+  sort?: { field: string; direction: 'asc' | 'desc' },
+  include_demographics: boolean = false
 ): Promise<any> {
-  const datasetId = '9552739e-3d05-4c1b-8eff-ecabf391e2e5'; // Medicare Part D Prescribers - by Provider and Drug
+  // If demographics requested or no drug filter, use by-provider dataset (has demographics)
+  // Otherwise use by-provider-and-drug dataset (has drug-specific data)
+  const useProviderDataset = include_demographics || !drug_name;
+
+  // Medicare Part D Prescribers - by Provider (has demographics, no drug breakdown)
+  const providerDatasetId = '14d8e8a9-7e9b-4370-a044-bf97c46b4b44';
+  // Medicare Part D Prescribers - by Provider and Drug (no demographics, has drug breakdown)
+  const providerDrugDatasetId = '9552739e-3d05-4c1b-8eff-ecabf391e2e5';
+
+  const datasetId = useProviderDataset ? providerDatasetId : providerDrugDatasetId;
 
   const query = new URLSearchParams();
   query.append('size', String(size));
   query.append('offset', String(offset));
 
   // Use keyword search for drug name (searches across all fields, supports partial match)
-  if (drug_name) {
+  if (drug_name && !useProviderDataset) {
     query.append('keyword', drug_name);
   }
   if (prescriber_npi) {
     query.append('filter[Prscrbr_NPI]', prescriber_npi);
+  }
+  // Handle both PRSCRBR_NPI (provider dataset) and Prscrbr_NPI (drug dataset)
+  if (prescriber_npi && useProviderDataset) {
+    query.append('filter[PRSCRBR_NPI]', prescriber_npi);
   }
   if (prescriber_type) {
     query.append('filter[Prscrbr_Type]', prescriber_type);
@@ -716,22 +734,83 @@ async function searchPrescribers(
   }
   const data = await response.json() as any[];
 
-  return {
-    total: data.length,
-    prescribers: data.map((item: any) => ({
-      npi: item.Prscrbr_NPI,
-      prescriber_name: `${item.Prscrbr_Last_Org_Name}, ${item.Prscrbr_First_Name || ''}`,
-      prescriber_type: item.Prscrbr_Type,
-      city: item.Prscrbr_City,
-      state: item.Prscrbr_State_Abrvtn,
-      brand_name: item.Brnd_Name,
-      generic_name: item.Gnrc_Name,
-      total_claims: item.Tot_Clms,
-      total_30day_fills: item.Tot_30day_Fills,
-      total_drug_cost: item.Tot_Drug_Cst,
-      total_beneficiaries: item.Tot_Benes
-    }))
-  };
+  if (useProviderDataset) {
+    // Provider dataset with demographics
+    return {
+      total: data.length,
+      dataset_type: 'by_provider',
+      includes_demographics: true,
+      prescribers: data.map((item: any) => ({
+        npi: item.PRSCRBR_NPI || item.Prscrbr_NPI,
+        prescriber_name: `${item.Prscrbr_Last_Org_Name}, ${item.Prscrbr_First_Name || ''}`.trim(),
+        prescriber_type: item.Prscrbr_Type,
+        credentials: item.Prscrbr_Crdntls,
+        city: item.Prscrbr_City,
+        state: item.Prscrbr_State_Abrvtn,
+        zip: item.Prscrbr_zip5,
+        total_claims: item.Tot_Clms,
+        total_30day_fills: item.Tot_30day_Fills,
+        total_drug_cost: item.Tot_Drug_Cst,
+        total_day_supply: item.Tot_Day_Suply,
+        total_beneficiaries: item.Tot_Benes,
+        // Demographics - Age
+        bene_avg_age: item.Bene_Avg_Age,
+        bene_age_lt_65_cnt: item.Bene_Age_LT_65_Cnt,
+        bene_age_65_74_cnt: item.Bene_Age_65_74_Cnt,
+        bene_age_75_84_cnt: item.Bene_Age_75_84_Cnt,
+        bene_age_gt_84_cnt: item.Bene_Age_GT_84_Cnt,
+        // Demographics - Gender
+        bene_feml_cnt: item.Bene_Feml_Cnt,
+        bene_male_cnt: item.Bene_Male_Cnt,
+        // Demographics - Dual Eligible
+        bene_dual_cnt: item.Bene_Dual_Cnt,
+        bene_ndual_cnt: item.Bene_Ndual_Cnt,
+        // Demographics - Race
+        bene_race_wht_cnt: item.Bene_Race_Wht_Cnt,
+        bene_race_black_cnt: item.Bene_Race_Black_Cnt,
+        bene_race_api_cnt: item.Bene_Race_Api_Cnt,
+        bene_race_hspnc_cnt: item.Bene_Race_Hspnc_Cnt,
+        bene_race_natind_cnt: item.Bene_Race_Natind_Cnt,
+        bene_race_othr_cnt: item.Bene_Race_Othr_Cnt,
+        // Risk Score
+        bene_avg_risk_scre: item.Bene_Avg_Risk_Scre,
+        // Drug type breakdowns
+        brand_claims: item.Brnd_Tot_Clms,
+        brand_drug_cost: item.Brnd_Tot_Drug_Cst,
+        generic_claims: item.Gnrc_Tot_Clms,
+        generic_drug_cost: item.Gnrc_Tot_Drug_Cst,
+        // LIS (Low Income Subsidy) breakdown
+        lis_claims: item.LIS_Tot_Clms,
+        lis_drug_cost: item.LIS_Drug_Cst,
+        nonlis_claims: item.NonLIS_Tot_Clms,
+        nonlis_drug_cost: item.NonLIS_Drug_Cst,
+        // Opioid metrics
+        opioid_claims: item.Opioid_Tot_Clms,
+        opioid_beneficiaries: item.Opioid_Tot_Benes,
+        opioid_prescriber_rate: item.Opioid_Prscrbr_Rate
+      }))
+    };
+  } else {
+    // Drug dataset without demographics
+    return {
+      total: data.length,
+      dataset_type: 'by_provider_and_drug',
+      includes_demographics: false,
+      prescribers: data.map((item: any) => ({
+        npi: item.Prscrbr_NPI,
+        prescriber_name: `${item.Prscrbr_Last_Org_Name}, ${item.Prscrbr_First_Name || ''}`.trim(),
+        prescriber_type: item.Prscrbr_Type,
+        city: item.Prscrbr_City,
+        state: item.Prscrbr_State_Abrvtn,
+        brand_name: item.Brnd_Name,
+        generic_name: item.Gnrc_Name,
+        total_claims: item.Tot_Clms,
+        total_30day_fills: item.Tot_30day_Fills,
+        total_drug_cost: item.Tot_Drug_Cst,
+        total_beneficiaries: item.Tot_Benes
+      }))
+    };
+  }
 }
 
 async function searchHospitals(
@@ -2177,7 +2256,8 @@ async function runServer() {
                   (args as any)?.state,
                   (args as any)?.size,
                   (args as any)?.offset,
-                  (args as any)?.sort
+                  (args as any)?.sort,
+                  (args as any)?.include_demographics
                 );
                 return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false };
               }
@@ -2409,7 +2489,7 @@ async function runServer() {
                 result = await searchMedicare(data.dataset_type, data.year, data.hcpcs_code, data.geo_level, data.geo_code, data.place_of_service, data.size, data.offset, data.text_search, data.sort, data.provider_type);
                 break;
               case 'search_prescribers':
-                result = await searchPrescribers(data.drug_name, data.prescriber_npi, data.prescriber_type, data.state, data.size, data.offset, data.sort);
+                result = await searchPrescribers(data.drug_name, data.prescriber_npi, data.prescriber_type, data.state, data.size, data.offset, data.sort, data.include_demographics);
                 break;
               case 'search_hospitals':
                 result = await searchHospitals(data.hospital_name, data.hospital_id, data.state, data.city, data.drg_code, data.size, data.offset, data.sort);
